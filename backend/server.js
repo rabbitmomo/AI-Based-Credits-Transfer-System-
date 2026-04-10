@@ -3,10 +3,12 @@ const dotenv = require('dotenv');
 const ENV_PATH = path.resolve(__dirname, '../.env');
 dotenv.config({ path: ENV_PATH });
 const express = require('express');
+const cors = require('cors');
 const multer = require('multer');
 const { GoogleGenAI } = require('@google/genai');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 const upload = multer({
@@ -121,7 +123,7 @@ app.post('/api/similarity-embedding', async (req, res) => {
     const vectorA = getEmbeddingValues(embedA);
     const vectorB = getEmbeddingValues(embedB);
     const cosineScore = cosineSimilarity(vectorA, vectorB);
-
+//push
     return res.json({
       sentenceA,
       sentenceB,
