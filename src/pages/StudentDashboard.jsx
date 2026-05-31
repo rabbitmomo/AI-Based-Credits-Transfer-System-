@@ -144,7 +144,7 @@ const StudentDashboard = () => {
       </Row>
 
       {showTransferCreditForm && (
-        <Row className="mb-4" style={{ marginTop: '400px' }} ref={transferCreditRef}>
+        <Row className="mt-4 mb-4 pt-2" ref={transferCreditRef}>
           <Col>
             <Card className="shadow-sm border-primary">
               <Card.Header className="bg-primary text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
