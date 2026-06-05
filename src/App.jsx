@@ -3,6 +3,7 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import NavbarComponent from './components/Navbar';
 import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
 import StudentDashboard from './pages/StudentDashboard';
 import TransferCreditPage from './pages/TransferCreditPage';
 import KPDashboard from './pages/KPDashboard';
@@ -17,6 +18,7 @@ function App() {
         <NavbarComponent />
         <Routes>
           <Route path="/" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
           <Route
             path="/student-dashboard"
             element={

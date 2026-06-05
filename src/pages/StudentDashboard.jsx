@@ -1,15 +1,14 @@
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import { Container, Row, Col, Card, Button, Badge, Modal, ListGroup, Tabs, Tab, Table } from 'react-bootstrap';
 import { useAuth } from '../context/AuthContext';
 import CourseRequestForm from '../components/CourseRequestForm';
 import DocumentUpload from '../components/DocumentUpload';
 import ChatBot from '../components/ChatBot';
 import OfficialApplicationForm from '../components/OfficialApplicationForm';
-import ErrorBoundary from '../components/ErrorBoundary';
 
 const StudentDashboard = () => {
   const { user } = useAuth();
-  const [applications] = useState([
+  const [applications, setApplications] = useState([
     {
       idPermohonan: 'REQ001',
       courses: [
@@ -38,10 +37,9 @@ const StudentDashboard = () => {
   const [showCourseForm, setShowCourseForm] = useState(false);
   const [showDocUpload, setShowDocUpload] = useState(false);
   const [showChatBot, setShowChatBot] = useState(false);
-  const [showTransferCreditForm, setShowTransferCreditForm] = useState(false);
+  const [showOfficialForm, setShowOfficialForm] = useState(false);
   const [selectedApplication, setSelectedApplication] = useState(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
-  const transferCreditRef = useRef(null);
 
   const getStatusBadge = (status) => {
     const variants = {
@@ -57,6 +55,35 @@ const StudentDashboard = () => {
   const handleViewDetail = (app) => {
     setSelectedApplication(app);
     setShowDetailModal(true);
+  };
+
+  const handleOfficialFormSubmit = (formData) => {
+    const newApplication = {
+      idPermohonan: `REQ${String(applications.length + 1).padStart(3, '0')}`,
+      courses: formData.courses.map((course) => ({
+        kursusDiploma: course.kursusDiploma,
+        kodDiploma: course.kursusDiploma,
+        namaDiploma: course.namaDiploma,
+        kursusSasaran: course.kursusSetara,
+        kodSasaran: course.kursusSetara,
+        namaSasaran: course.namaSetara,
+        gred: course.gred,
+        kreditDiploma: course.kreditDiploma,
+        kreditSetara: course.kreditSetara,
+      })),
+      statusPermohonan: 'Menunggu Analisis',
+      tarikhHantar: new Date().toISOString().split('T')[0],
+      skorAI: 0,
+      maklumatPeibadi: {
+        noMatrik: formData.noMatrik,
+        nama: formData.nama,
+        fakulti: formData.fakulti,
+        program: formData.program,
+      },
+    };
+
+    setApplications([...applications, newApplication]);
+    setShowOfficialForm(false);
   };
 
   const totalApplications = applications.length;
@@ -79,15 +106,10 @@ const StudentDashboard = () => {
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => {
-                setShowTransferCreditForm(true);
-                setTimeout(() => {
-                  transferCreditRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }, 0);
-              }}
+              onClick={() => setShowOfficialForm(true)}
               className="mt-2"
             >
-              Buka Borang
+              Isi
             </Button>
           </Card>
         </Col>
@@ -142,36 +164,6 @@ const StudentDashboard = () => {
           </Card>
         </Col>
       </Row>
-
-      {showTransferCreditForm && (
-        <Row className="mt-4 mb-4 pt-2" ref={transferCreditRef}>
-          <Col>
-            <Card className="shadow-sm border-primary">
-              <Card.Header className="bg-primary text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
-                <Card.Title className="mb-0">Borang Permohonan Pemindahan Kredit Secara Menegak</Card.Title>
-                <Button
-                  variant="light"
-                  size="sm"
-                  onClick={() => setShowTransferCreditForm(false)}
-                >
-                  Tutup
-                </Button>
-              </Card.Header>
-              <Card.Body style={{ 
-                maxHeight: '75vh', 
-                overflowY: 'scroll',
-                overflowX: 'hidden',
-                scrollBehavior: 'smooth'
-              }}>
-                <ErrorBoundary>
-                  <OfficialApplicationForm />
-                </ErrorBoundary>
-              </Card.Body>
-            </Card>
-          </Col>
-        </Row>
-      )}
-
       <Row className="mb-4">
         <Col>
           <Card>
@@ -380,6 +372,15 @@ const StudentDashboard = () => {
         </Modal.Header>
         <Modal.Body>
           <DocumentUpload />
+        </Modal.Body>
+      </Modal>
+
+      <Modal show={showOfficialForm} onHide={() => setShowOfficialForm(false)} size="xl" scrollable>
+        <Modal.Header closeButton>
+          <Modal.Title>Borang Permohonan Pemindahan Kredit Secara Menegak</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          <OfficialApplicationForm onSubmit={handleOfficialFormSubmit} />
         </Modal.Body>
       </Modal>
 

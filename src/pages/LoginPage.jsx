@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Container, Row, Col, Form, Button, Alert } from 'react-bootstrap';
+import { supabase } from '../lib/supabaseClient';
 import '../styles/Login.css';
 
 const LoginPage = () => {
@@ -11,27 +12,35 @@ const LoginPage = () => {
   const navigate = useNavigate();
   const { login } = useAuth();
 
-  const handleLogin = (e) => {
+  const handleLogin = async (e) => {
     e.preventDefault();
     setError('');
     if (!email || !password) {
       setError('Sila masukkan emel dan kata laluan');
       return;
     }
-    let role = 'pelajar';
-    if (email.includes('kp')) {
-      role = 'ketua_program';
-    } else if (email.includes('admin')) {
-      role = 'pentadbir';
+    const signInResult = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (signInResult.error) {
+      setError(signInResult.error.message || 'Gagal log masuk ke Supabase');
+      return;
     }
-
+    const authUser = signInResult.data?.user || null;
+    if (!authUser) {
+      setError('Sesi Supabase tidak diterima. Sila cuba lagi.');
+      return;
+    }
+    const role = authUser.user_metadata?.peranan || 'pelajar';
+    const profileName = authUser.user_metadata?.full_name || email.split('@')[0];
     const userData = {
-      idPengguna: 'USR' + Date.now(),
-      namaPengguna: email.split('@')[0],
-      emel: email,
+      id: authUser.id,
+      idPengguna: authUser.id,
+      namaPengguna: profileName,
+      emel: authUser.email || email,
       peranan: role,
     };
-
     login(userData);
     if (role === 'pelajar') {
       navigate('/student-dashboard');
@@ -41,7 +50,6 @@ const LoginPage = () => {
       navigate('/admin-dashboard');
     }
   };
-
   return (
     <div className="login-container">
       <div className="login-wrapper">
@@ -92,40 +100,81 @@ const LoginPage = () => {
               <i className="bi bi-box-arrow-in-right me-2"></i>Log Masuk Sebagai Pelajar
             </Button>
           </Form>
-          <div style={{ marginTop: '10px'}}>
-            <Button 
-              variant="info" 
+          <div className="mt-3 d-grid gap-2">
+            <Button
+              variant="info"
               className="w-100"
-              style={{ marginBottom: '8px' }}
-              onClick={() => {
-                const userData = {
-                  idPengguna: 'KP001',
-                  namaPengguna: 'kp-admin',
-                  emel: 'kp@test.com',
-                  peranan: 'ketua_program',
-                };
-                login(userData);
+              onClick={async () => {
+                const emailValue = 'kp@test.com';
+                const passwordValue = 'Password10';
+                const signInResult = await supabase.auth.signInWithPassword({
+                  email: emailValue,
+                  password: passwordValue,
+                });
+
+                if (signInResult.error) {
+                  setError(signInResult.error.message || 'Akaun Ketua Program belum wujud. Sila daftar dahulu.');
+                  return;
+                }
+
+                const authUser = signInResult.data?.user || null;
+                if (!authUser) {
+                  setError('Sesi Supabase tidak diterima.');
+                  return;
+                }
+
+                login({
+                  id: authUser.id,
+                  idPengguna: authUser.id,
+                  namaPengguna: authUser.user_metadata?.full_name || 'kp-admin',
+                  emel: authUser.email || emailValue,
+                  peranan: authUser.user_metadata?.peranan || 'ketua_program',
+                });
                 navigate('/kp-dashboard');
               }}
             >
               <i className="bi bi-person-badge me-2"></i>Log Masuk Sebagai Ketua Program
             </Button>
-            <Button 
+            <Button
               variant="secondary"
               className="w-100"
-              onClick={() => {
-                const userData = {
-                  idPengguna: 'ADM001',
-                  namaPengguna: 'admin-user',
-                  emel: 'admin@test.com',
-                  peranan: 'pentadbir',
-                };
-                login(userData);
+              onClick={async () => {
+                const emailValue = 'admin@test.com';
+                const passwordValue = 'Password10';
+                const signInResult = await supabase.auth.signInWithPassword({
+                  email: emailValue,
+                  password: passwordValue,
+                });
+
+                if (signInResult.error) {
+                  setError(signInResult.error.message || 'Akaun Pentadbir belum wujud. Sila daftar dahulu.');
+                  return;
+                }
+
+                const authUser = signInResult.data?.user || null;
+                if (!authUser) {
+                  setError('Sesi Supabase tidak diterima.');
+                  return;
+                }
+
+                login({
+                  id: authUser.id,
+                  idPengguna: authUser.id,
+                  namaPengguna: authUser.user_metadata?.full_name || 'admin-user',
+                  emel: authUser.email || emailValue,
+                  peranan: authUser.user_metadata?.peranan || 'pentadbir',
+                });
                 navigate('/admin-dashboard');
               }}
             >
               <i className="bi bi-shield-lock me-2"></i>Log Masuk Sebagai Pentadbir
             </Button>
+            <div className="text-center mt-2">
+              <span className="text-muted">Belum ada akaun? </span>
+              <Link to="/register" className="text-decoration-none fw-semibold">
+                Daftar di sini
+              </Link>
+            </div>
           </div>
         </div>
       </div>

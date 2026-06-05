@@ -1,8 +1,11 @@
 import React, { useState } from 'react';
 import { Form, Button, Alert, Row, Col, Card, Badge, Table, Modal, Accordion, Tabs, Tab } from 'react-bootstrap';
+import { useAuth } from '../context/AuthContext';
+import { saveTransferCreditApplication } from '../services/transferCreditApplicationService';
 
 const OfficialApplicationForm = ({ onSubmit }) => {
   const API_BASE_URL = 'http://localhost:3000';
+  const { user } = useAuth();
 
   const [formData, setFormData] = useState({
     noMatrik: '',
@@ -42,6 +45,7 @@ const OfficialApplicationForm = ({ onSubmit }) => {
   const [showPreview, setShowPreview] = useState(false);
   const [success, setSuccess] = useState(false);
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [analyzingCourseIds, setAnalyzingCourseIds] = useState([]);
   const [analysisMessage, setAnalysisMessage] = useState({ type: '', text: '' });
   const [analysisResults, setAnalysisResults] = useState({});
@@ -231,21 +235,26 @@ const OfficialApplicationForm = ({ onSubmit }) => {
     }));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setIsSubmitting(true);
+
     if (!formData.noMatrik || !formData.nama || !formData.fakulti) {
       setError('Sila lengkapkan maklumat peribadi');
+      setIsSubmitting(false);
       return;
     }
 
     if (!documents.transkrip || !documents.sinopsis || !documents.bayaran) {
       setError('Sila muat naik semua dokumen sokongan yang diperlukan');
+      setIsSubmitting(false);
       return;
     }
 
     if (formData.courses.length === 0) {
       setError('Sila tambahkan sekurang-kurangnya satu kursus');
+      setIsSubmitting(false);
       return;
     }
     const incompleteCourse = formData.courses.some(c =>
@@ -254,6 +263,7 @@ const OfficialApplicationForm = ({ onSubmit }) => {
 
     if (incompleteCourse) {
       setError('Sila lengkapkan maklumat semua kursus');
+      setIsSubmitting(false);
       return;
     }
 
@@ -265,13 +275,34 @@ const OfficialApplicationForm = ({ onSubmit }) => {
 
     if (invalidKredit) {
       setError('Kredit mestilah nombor yang lebih besar daripada 0');
+      setIsSubmitting(false);
       return;
     }
-    if (onSubmit) {
-      onSubmit(formData);
+
+    try {
+      const savedApplication = await saveTransferCreditApplication({
+        user,
+        formData,
+        documents,
+        totalKreditDiploma,
+        totalKreditSetara,
+        analysisResults,
+      });
+
+      if (onSubmit) {
+        onSubmit({
+          ...formData,
+          savedApplication,
+        });
+      }
+
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 3000);
+    } catch (submitError) {
+      setError(submitError.message || 'Gagal menghantar borang ke Supabase');
+    } finally {
+      setIsSubmitting(false);
     }
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 3000);
   };
 
   const totalKreditDiploma = formData.courses.reduce((sum, course) => sum + parseInt(course.kreditDiploma || 0), 0);
@@ -969,10 +1000,11 @@ const OfficialApplicationForm = ({ onSubmit }) => {
           <Button
             variant="primary"
             type="submit"
-            disabled={!allDocumentsChecked}
+            disabled={!allDocumentsChecked || isSubmitting}
             size="lg"
           >
-            <i className="bi bi-send me-2"></i>Hantar Borang
+            <i className="bi bi-send me-2"></i>
+            {isSubmitting ? 'Menyimpan...' : 'Hantar Borang'}
           </Button>
         </div>
       </Form>
