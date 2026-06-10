@@ -357,6 +357,7 @@ const StudentDashboard = () => {
           )}
         </Modal.Body>
       </Modal>
+      
       <Modal show={showCourseForm} onHide={() => setShowCourseForm(false)} size="lg">
         <Modal.Header closeButton>
           <Modal.Title>Buat Permohonan Kursus (Berbilang)</Modal.Title>

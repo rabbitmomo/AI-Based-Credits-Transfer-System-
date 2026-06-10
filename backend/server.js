@@ -6,6 +6,7 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const { GoogleGenAI } = require('@google/genai');
+const { supabase } = require("./supabaseClient");
 
 const app = express();
 app.use(cors());
@@ -537,6 +538,323 @@ language_detected must indicate original language and any translation that occur
     return res.status(500).json({
       error: 'Failed to extract structured data from PDF',
       details: error.message,
+    });
+  }
+});
+
+app.post('/api/pdf-ocr-structured-save', upload.any(), async (req, res) => {
+  try {
+    dotenv.config({ path: ENV_PATH, override: true });
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    const file = req.files?.find((uploadedFile) => uploadedFile?.mimetype === 'application/pdf');
+
+    if (!file) {
+      return res.status(400).json({
+        error: "Please upload a PDF file in form-data using any field name",
+      });
+    }
+
+    if (file.mimetype !== 'application/pdf') {
+      return res.status(400).json({
+        error: 'Only PDF files are supported for this route',
+      });
+    }
+
+    if (!apiKey) {
+      return res.status(500).json({
+        error: 'Missing GEMINI_API_KEY in backend environment variables',
+      });
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+
+    const extractionPrompt = `You are an academic course information extraction system.
+
+Your task is to extract structured information from a university course outline PDF.
+
+Return ONLY valid JSON. No explanations. No markdown. No extra text.
+
+OUTPUT SCHEMA (must follow exactly):
+{
+  "course_code": "",
+  "course_name": "",
+  "credits": 0,
+  "synopsis": "",
+  "learning_outcomes": [],
+  "topics": [],
+  "assessments": [],
+  "academic_level": "",
+  "language_detected": ""
+}
+
+EXTRACTION RULES:
+
+1. Do NOT summarize or rewrite content.
+   - Keep wording as close to original as possible.
+
+2. LANGUAGE HANDLING - CRITICAL:
+   - Detect the ORIGINAL language of the PDF document.
+   - If text is bilingual (Malay/English), extract ONLY the Malay version.
+   - Remove all English translations and equivalents.
+   - Keep only Bahasa Melayu content.
+   - If learning outcomes are listed as "Malay English", extract only the Malay part.
+   - Example: "Menerang konsep Explain the concept" → extract only "Menerang konsep"
+   - If document is ONLY in English, TRANSLATE all content to Bahasa Melayu.
+   - Keep academic terms accurate when translating.
+   - Set language_detected to track translation:
+     * If Bahasa Melayu original: "Bahasa Melayu"
+     * If Bilingual (Malay/English): "Bahasa Melayu (Bilingual - English removed)"
+     * If English translated: "English (translated to Bahasa Melayu)"
+
+3. Learning Outcomes:
+   - Extract CLO / HPK / Learning Outcomes / Hasil Pembelajaran.
+   - Include all listed outcomes.
+
+4. Topics:
+   - Extract ONLY if explicitly written in the document.
+   - Do NOT infer or generate missing topics.
+
+5. Assessments:
+   - Extract assessment components and weights if available.
+   - Example: Laporan, Ujian, Pembentangan, Tugasan.
+
+6. Synopsis:
+   - Extract course description section only.
+
+7. Ignore:
+   - references
+   - bibliography
+   - senate approval notes
+   - administrative text
+   - page numbers
+   - formatting artifacts
+
+8. If a field is missing:
+   - return empty string "" or empty array []
+   - DO NOT guess or infer
+
+9. Preserve academic meaning and structure.
+
+IMPORTANT:
+This output will be used for AI-based credit transfer evaluation.
+Accuracy is critical.
+OUTPUT MUST ALWAYS BE IN BAHASA MELAYU.
+language_detected must indicate original language and any translation that occurred.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: extractionPrompt,
+            },
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: file.buffer.toString('base64'),
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const responseText = (response.text || '').trim();
+
+    let jsonText = responseText;
+    const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) {
+      jsonText = jsonMatch[1];
+    } else if (responseText.match(/```\s*([\s\S]*?)\s*```/)) {
+      jsonText = responseText.match(/```\s*([\s\S]*?)\s*```/)[1];
+    }
+
+    let structuredData;
+    try {
+      structuredData = JSON.parse(jsonText);
+    } catch (parseError) {
+      return res.status(500).json({
+        error: 'Failed to parse extracted data as JSON',
+        details: parseError.message,
+        rawResponse: responseText,
+      });
+    }
+
+    const courseCode = String(structuredData.course_code || '').trim();
+    const courseName = String(structuredData.course_name || '').trim();
+
+    if (!courseCode || !courseName) {
+      return res.status(400).json({
+        error: 'Extracted data must include course_code and course_name before saving',
+        data: structuredData,
+      });
+    }
+
+    const normalizeText = (value) =>
+      String(value || '')
+        .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const { data: existingCourses, error: existingError } = await supabase
+      .from('courses')
+      .select('id, course_code, course_name')
+      .or(`course_code.eq.${courseCode},course_name.eq.${courseName}`);
+
+    if (existingError) {
+      return res.status(400).json({
+        error: existingError.message,
+      });
+    }
+
+    const normalizedCourseCode = normalizeText(courseCode);
+    const normalizedCourseName = normalizeText(courseName);
+
+    const similarCourse = (existingCourses || []).find((course) => {
+      const existingCode = normalizeText(course.course_code);
+      const existingName = normalizeText(course.course_name);
+      return (
+        existingCode === normalizedCourseCode ||
+        existingName === normalizedCourseName ||
+        existingName.includes(normalizedCourseName) ||
+        normalizedCourseName.includes(existingName)
+      );
+    });
+
+    if (similarCourse) {
+      return res.status(409).json({
+        error: 'A similar course already exists. Saving was blocked to avoid duplicates.',
+        existing_course: similarCourse,
+      });
+    }
+
+    const courseRecord = {
+      course_code: courseCode,
+      course_name: courseName,
+      synopsis: structuredData.synopsis || null,
+      learning_outcomes: Array.isArray(structuredData.learning_outcomes)
+        ? structuredData.learning_outcomes
+        : [],
+      topics: Array.isArray(structuredData.topics) ? structuredData.topics : [],
+      assessments: Array.isArray(structuredData.assessments) ? structuredData.assessments : [],
+      credits: Number.isFinite(Number(structuredData.credits)) ? Number(structuredData.credits) : 0,
+      academic_level: structuredData.academic_level || null,
+      language_detected: structuredData.language_detected || null,
+      source_filename: file.originalname,
+      source_mime_type: file.mimetype,
+    };
+
+    const { data: insertedCourse, error: insertError } = await supabase
+      .from('courses')
+      .insert([courseRecord])
+      .select('*')
+      .single();
+
+    if (insertError) {
+      return res.status(400).json({
+        error: insertError.message,
+      });
+    }
+
+    return res.status(201).json({
+      message: 'Course extracted and saved successfully',
+      data: insertedCourse,
+      extracted: structuredData,
+    });
+  } catch (error) {
+    console.error('Gemini PDF structured save error:', error);
+    return res.status(500).json({
+      error: 'Failed to extract and save structured data from PDF',
+      details: error.message,
+    });
+  }
+});
+
+app.get("/api/courses/selection", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("courses")
+      .select("course_code, course_name, credits")
+      .order("course_code", { ascending: true });
+
+    if (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    const courseOptions = (data || []).map((c) => ({
+      course_code: c.course_code,
+      course_name: c.course_name,
+      credits: c.credits,
+    }));
+
+    const creditsOptions = Array.from(
+      new Set((data || []).map((c) => c.credits).filter((v) => v !== null && v !== undefined)),
+    ).sort((a, b) => (Number(a) > Number(b) ? 1 : -1));
+
+    const defaultPayload = {
+      courseA: {
+        course_code: "",
+        course_name: "",
+        learning_outcomes: [],
+        topics: [],
+        synopsis: "",
+        assessments: [],
+      },
+      courseB: {
+        course_code: "",
+        course_name: "",
+        learning_outcomes: [],
+        topics: [],
+        synopsis: "",
+        assessments: [],
+      },
+      credits_requested: null,
+      message:
+        "Saya memohon pengiktirafan kredit untuk kursus ini. Sila lampirkan dokumen sokongan dan tekan Hantar.",
+    };
+
+    return res.status(200).json({
+      message: "Course selection fetched successfully",
+      count: data.length,
+      courseOptions,
+      creditsOptions,
+      defaultPayload,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: "Internal server error",
+      details: err.message,
+    });
+  }
+});
+
+
+app.get("/api/courses", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("courses")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      return res.status(400).json({
+        error: error.message,
+      });
+    }
+
+    return res.status(200).json({
+      message: "Courses fetched successfully",
+      count: data.length,
+      data,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: "Internal server error",
+      details: err.message,
     });
   }
 });
