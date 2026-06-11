@@ -107,7 +107,7 @@ const LoginPage = () => {
               className="w-100"
               onClick={async () => {
                 const emailValue = 'kp@test.com';
-                const passwordValue = 'Password10';
+                const passwordValue = 'admin123';
                 const signInResult = await supabase.auth.signInWithPassword({
                   email: emailValue,
                   password: passwordValue,
@@ -142,7 +142,7 @@ const LoginPage = () => {
               className="w-100"
               onClick={async () => {
                 const emailValue = 'admin@test.com';
-                const passwordValue = 'Password10';
+                const passwordValue = 'admin123';
                 const signInResult = await supabase.auth.signInWithPassword({
                   email: emailValue,
                   password: passwordValue,

@@ -49,7 +49,13 @@ const KPDashboard = () => {
   const { user } = useAuth();
   const [applications, setApplications] = useState([]);
   const [selectedApp, setSelectedApp] = useState(null);
+  const [selectedCourseAnalysis, setSelectedCourseAnalysis] = useState(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [showAnalysisModal, setShowAnalysisModal] = useState(false);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisError, setAnalysisError] = useState('');
+  const [analysisResult, setAnalysisResult] = useState(null);
+  const [analysisArtifacts, setAnalysisArtifacts] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -240,6 +246,96 @@ const KPDashboard = () => {
   const handleViewDetail = (app) => {
     setSelectedApp(app);
     setShowDetailModal(true);
+  };
+
+  const handleViewAnalysis = (app, course) => {
+    setSelectedApp(app);
+    setSelectedCourseAnalysis(course);
+    setAnalysisError('');
+    setAnalysisResult(null);
+    setAnalysisArtifacts(null);
+    setShowAnalysisModal(true);
+  };
+
+  const fetchPdfAsFile = async (fileUrl, fileName) => {
+    const response = await fetch(fileUrl);
+    if (!response.ok) {
+      throw new Error(`Gagal memuat turun fail PDF: ${fileName}`);
+    }
+
+    const blob = await response.blob();
+    return new File([blob], fileName || 'document.pdf', { type: blob.type || 'application/pdf' });
+  };
+
+  const handleRunAnalysis = async () => {
+    if (!selectedCourseAnalysis?.diplomaPdf || !selectedCourseAnalysis?.degreePdf) {
+      setAnalysisError('PDF diploma dan PDF degree mesti wujud sebelum analisis boleh dijalankan.');
+      return;
+    }
+
+    setAnalysisLoading(true);
+    setAnalysisError('');
+    setAnalysisResult(null);
+    setAnalysisArtifacts(null);
+
+    try {
+      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'https://ai-based-credits-transfer-system-production.up.railway.app';
+
+      const diplomaFile = await fetchPdfAsFile(selectedCourseAnalysis.diplomaPdf.file_url, selectedCourseAnalysis.diplomaPdf.file_name);
+      const degreeFile = await fetchPdfAsFile(selectedCourseAnalysis.degreePdf.file_url, selectedCourseAnalysis.degreePdf.file_name);
+
+      const diplomaFormData = new FormData();
+      diplomaFormData.append('file', diplomaFile);
+
+      const degreeFormData = new FormData();
+      degreeFormData.append('file', degreeFile);
+
+      const [ocrDiplomaResponse, ocrDegreeResponse] = await Promise.all([
+        fetch(`${apiBaseUrl}/api/pdf-ocr-structured`, {
+          method: 'POST',
+          body: diplomaFormData,
+        }),
+        fetch(`${apiBaseUrl}/api/pdf-ocr-structured`, {
+          method: 'POST',
+          body: degreeFormData,
+        }),
+      ]);
+
+      if (!ocrDiplomaResponse.ok || !ocrDegreeResponse.ok) {
+        throw new Error('Gagal mengekstrak OCR berstruktur bagi PDF kursus');
+      }
+
+      const ocrDiplomaData = await ocrDiplomaResponse.json();
+      const ocrDegreeData = await ocrDegreeResponse.json();
+
+      const similarityResponse = await fetch(`${apiBaseUrl}/api/similarity-embedding-structured`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          courseA: ocrDiplomaData.data,
+          courseB: ocrDegreeData.data,
+        }),
+      });
+
+      if (!similarityResponse.ok) {
+        const similarityError = await similarityResponse.json().catch(() => ({}));
+        throw new Error(similarityError.error || similarityError.details || 'Gagal menjalankan analisis AI');
+      }
+
+      const similarityData = await similarityResponse.json();
+
+      setAnalysisArtifacts({
+        diploma: ocrDiplomaData.data,
+        degree: ocrDegreeData.data,
+      });
+      setAnalysisResult(similarityData);
+    } catch (runError) {
+      setAnalysisError(runError.message || 'Ralat semasa menjalankan analisis AI');
+    } finally {
+      setAnalysisLoading(false);
+    }
   };
 
   const renderFileLink = (file) => {
@@ -483,6 +579,7 @@ const KPDashboard = () => {
                         <th>PDF Degree</th>
                         <th>Kredit Degree</th>
                         <th>Skor Kesamaan</th>
+                        <th>Analisis AI</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -502,6 +599,15 @@ const KPDashboard = () => {
                             <Badge bg={(course.skorKesamaan || 0) >= 80 ? 'success' : 'warning'} style={{ fontSize: '12px' }}>
                               {formatScore(course.skorKesamaan)}
                             </Badge>
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <Button
+                              variant="outline-primary"
+                              size="sm"
+                              onClick={() => handleViewAnalysis(selectedApp, course)}
+                            >
+                              Lihat Analisis
+                            </Button>
                           </td>
                         </tr>
                       ))}
@@ -594,6 +700,263 @@ const KPDashboard = () => {
         </Modal.Body>
         <Modal.Footer>
           <Button variant="secondary" onClick={() => setShowDetailModal(false)}>
+            Tutup
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+      <Modal size="lg" show={showAnalysisModal} onHide={() => setShowAnalysisModal(false)}>
+        <Modal.Header closeButton style={{ backgroundColor: '#10b981', color: 'white' }}>
+          <Modal.Title>
+            <i className="bi bi-clipboard2-data" style={{ marginRight: '10px' }} />
+            Analisis AI Kursus
+          </Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {selectedApp && selectedCourseAnalysis && (
+            <>
+              <div className="mb-3 p-3 rounded" style={{ background: '#f8fafc' }}>
+                <h6 className="fw-bold mb-2">Pasangan Kursus</h6>
+                <div className="mb-2">
+                  <strong>Kursus Diploma:</strong> {selectedCourseAnalysis.diploma?.course_code || '-'} - {selectedCourseAnalysis.diploma?.course_name || '-'}
+                </div>
+                <div>
+                  <strong>Kursus Degree:</strong> {selectedCourseAnalysis.degree?.course_code || '-'} - {selectedCourseAnalysis.degree?.course_name || '-'}
+                </div>
+              </div>
+
+              <div className="mb-3">
+                <h6 className="fw-bold mb-2">Pautan PDF</h6>
+                <div className="d-flex flex-column gap-2">
+                  <div>
+                    <strong>PDF Diploma:</strong> {renderFileLink(selectedCourseAnalysis.diplomaPdf)}
+                  </div>
+                  <div>
+                    <strong>PDF Degree:</strong> {renderFileLink(selectedCourseAnalysis.degreePdf)}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mb-3">
+                <Button variant="primary" onClick={handleRunAnalysis} disabled={analysisLoading}>
+                  {analysisLoading ? 'Sedang menjalankan analisis...' : 'Jalankan Analisis AI'}
+                </Button>
+                {analysisError && (
+                  <Alert variant="danger" className="mt-3 mb-0">
+                    {analysisError}
+                  </Alert>
+                )}
+              </div>
+
+              {analysisResult && analysisArtifacts && (
+                <>
+                  <div className="mb-3">
+                    <h6 className="fw-bold mb-2">Ringkasan Analisis</h6>
+                    <Table bordered hover responsive size="sm" className="align-middle mb-0">
+                      <tbody>
+                        <tr>
+                          <th style={{ width: '25%' }}>Skor Kesamaan</th>
+                          <td>{Number((analysisResult.evaluation?.final_score || 0) * 100).toFixed(2)}%</td>
+                          <th style={{ width: '25%' }}>Keyakinan AI</th>
+                          <td>{Number((analysisResult.evaluation?.confidence || 0) * 100).toFixed(2)}%</td>
+                        </tr>
+                        <tr>
+                          <th>Keputusan</th>
+                          <td colSpan="3">
+                            <Badge bg={analysisResult.evaluation?.decision === 'Equivalent' ? 'success' : 'warning'}>
+                              {analysisResult.evaluation?.decision || '-'}
+                            </Badge>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </Table>
+                  </div>
+
+                  <div className="mb-3">
+                    <h6 className="fw-bold mb-2">Bidang Dibandingkan</h6>
+                    <Table bordered hover responsive size="sm" className="align-middle mb-0">
+                      <thead className="table-light">
+                        <tr>
+                          <th style={{ width: '70%' }}>Bidang</th>
+                          <th style={{ width: '30%' }}>Berat</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(analysisResult.fields_available || []).length > 0 ? (
+                          analysisResult.fields_available.map((field) => (
+                            <tr key={field}>
+                              <td>{field}</td>
+                              <td>{analysisResult.redistributed_weights?.[field] ?? '-'}%</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan="2" className="text-center text-muted">
+                              Tiada bidang ditemui.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </Table>
+                  </div>
+
+                  <div className="mb-3">
+                    <h6 className="fw-bold mb-2">Skor Setiap Bidang</h6>
+                    <Table bordered hover responsive size="sm" className="align-middle mb-0">
+                      <thead className="table-light">
+                        <tr>
+                          <th>Bidang</th>
+                          <th>Skor</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {analysisResult.evaluation?.scores && Object.keys(analysisResult.evaluation.scores).length > 0 ? (
+                          Object.entries(analysisResult.evaluation.scores).map(([field, score]) => (
+                            <tr key={field}>
+                              <td>{field}</td>
+                              <td>{score === null || score === undefined ? '-' : score}</td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan="2" className="text-center text-muted">
+                              Tiada skor tersedia.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </Table>
+                  </div>
+
+                  <div className="mb-3">
+                    <h6 className="fw-bold mb-2">OCR Kursus Diploma</h6>
+                    <Table bordered hover responsive size="sm" className="align-middle mb-0">
+                      <tbody>
+                        <tr>
+                          <th style={{ width: '22%' }}>Kod</th>
+                          <td>{analysisArtifacts.diploma.course_code || '-'}</td>
+                          <th style={{ width: '22%' }}>Nama</th>
+                          <td>{analysisArtifacts.diploma.course_name || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Kredit</th>
+                          <td>{analysisArtifacts.diploma.credits ?? '-'}</td>
+                          <th>Bahasa</th>
+                          <td>{analysisArtifacts.diploma.language_detected || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Synopsis</th>
+                          <td colSpan="3">{analysisArtifacts.diploma.synopsis || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Learning Outcomes</th>
+                          <td colSpan="3">
+                            {(analysisArtifacts.diploma.learning_outcomes || []).length > 0 ? (
+                              <ul className="mb-0 ps-3">
+                                {analysisArtifacts.diploma.learning_outcomes.map((item, index) => (
+                                  <li key={index}>{item}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              '-'
+                            )}
+                          </td>
+                        </tr>
+                        <tr>
+                          <th>Topics</th>
+                          <td colSpan="3">{(analysisArtifacts.diploma.topics || []).join(' | ') || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Assessments</th>
+                          <td colSpan="3">{(analysisArtifacts.diploma.assessments || []).join(' | ') || '-'}</td>
+                        </tr>
+                      </tbody>
+                    </Table>
+                  </div>
+
+                  <div className="mb-3">
+                    <h6 className="fw-bold mb-2">OCR Kursus Degree</h6>
+                    <Table bordered hover responsive size="sm" className="align-middle mb-0">
+                      <tbody>
+                        <tr>
+                          <th style={{ width: '22%' }}>Kod</th>
+                          <td>{analysisArtifacts.degree.course_code || '-'}</td>
+                          <th style={{ width: '22%' }}>Nama</th>
+                          <td>{analysisArtifacts.degree.course_name || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Kredit</th>
+                          <td>{analysisArtifacts.degree.credits ?? '-'}</td>
+                          <th>Bahasa</th>
+                          <td>{analysisArtifacts.degree.language_detected || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Synopsis</th>
+                          <td colSpan="3">{analysisArtifacts.degree.synopsis || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Learning Outcomes</th>
+                          <td colSpan="3">
+                            {(analysisArtifacts.degree.learning_outcomes || []).length > 0 ? (
+                              <ul className="mb-0 ps-3">
+                                {analysisArtifacts.degree.learning_outcomes.map((item, index) => (
+                                  <li key={index}>{item}</li>
+                                ))}
+                              </ul>
+                            ) : (
+                              '-'
+                            )}
+                          </td>
+                        </tr>
+                        <tr>
+                          <th>Topics</th>
+                          <td colSpan="3">{(analysisArtifacts.degree.topics || []).join(' | ') || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Assessments</th>
+                          <td colSpan="3">{(analysisArtifacts.degree.assessments || []).join(' | ') || '-'}</td>
+                        </tr>
+                      </tbody>
+                    </Table>
+                  </div>
+                </>
+              )}
+              {!analysisResult && (
+                <div className="mb-3">
+                  <h6 className="fw-bold mb-2">Ringkasan Kursus</h6>
+                  <Table bordered hover responsive size="sm" className="align-middle mb-0">
+                    <tbody>
+                      <tr>
+                        <th style={{ width: '25%' }}>Kursus Diploma</th>
+                        <td>{selectedCourseAnalysis.diploma?.course_code || '-'} - {selectedCourseAnalysis.diploma?.course_name || '-'}</td>
+                        <th style={{ width: '25%' }}>Kursus Degree</th>
+                        <td>{selectedCourseAnalysis.degree?.course_code || '-'} - {selectedCourseAnalysis.degree?.course_name || '-'}</td>
+                      </tr>
+                      <tr>
+                        <th>Skor Kesamaan</th>
+                        <td>{formatScore(selectedCourseAnalysis.skorKesamaan)}</td>
+                        <th>Keyakinan AI</th>
+                        <td>{selectedCourseAnalysis.confidenceScore !== null && selectedCourseAnalysis.confidenceScore !== undefined
+                          ? `${Number(selectedCourseAnalysis.confidenceScore).toFixed(2)}%`
+                          : '-'}</td>
+                      </tr>
+                      <tr>
+                        <th>Keputusan</th>
+                        <td colSpan="3">
+                          <Badge bg={selectedCourseAnalysis.decision === 'Equivalent' ? 'success' : 'warning'}>
+                            {selectedCourseAnalysis.decision || '-'}
+                          </Badge>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </Table>
+                </div>
+              )}
+            </>
+          )}
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShowAnalysisModal(false)}>
             Tutup
           </Button>
         </Modal.Footer>

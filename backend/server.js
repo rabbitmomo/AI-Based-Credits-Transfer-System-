@@ -643,7 +643,7 @@ OUTPUT MUST ALWAYS BE IN BAHASA MELAYU.
 language_detected must indicate original language and any translation that occurred.`;
 
     const response = await ai.models.generateContent({
-      model: 'gemini-2-flash',
+      model: 'gemini-3-flash-preview',
       contents: [
         {
           role: 'user',
