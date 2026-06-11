@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { saveTransferCreditApplication } from '../services/transferCreditApplicationService';
 
 const OfficialApplicationForm = ({ onSubmit }) => {
-  const API_BASE_URL = 'http://localhost:3000';
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ai-based-credits-transfer-system-production.up.railway.app';
   const { user } = useAuth();
 
   const [formData, setFormData] = useState({

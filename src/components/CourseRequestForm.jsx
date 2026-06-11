@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Form, Button, Alert, Row, Col, Card, Badge, ListGroup } from 'react-bootstrap';
 
 const CourseRequestForm = () => {
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ai-based-credits-transfer-system-production.up.railway.app';
   const diplomaCourses = [
     { code: 'DIP-CS101', name: 'Asas Pengaturcaraan', credits: 3 },
     { code: 'DIP-CS102', name: 'Struktur Data', credits: 3 },
@@ -69,11 +70,11 @@ const CourseRequestForm = () => {
       formDataB.append('file', pdfCourseB);
 
       const [structuredResponseA, structuredResponseB] = await Promise.all([
-        fetch('http://localhost:3000/api/pdf-ocr-structured', {
+        fetch(`${API_BASE_URL}/api/pdf-ocr-structured`, {
           method: 'POST',
           body: formDataA,
         }),
-        fetch('http://localhost:3000/api/pdf-ocr-structured', {
+        fetch(`${API_BASE_URL}/api/pdf-ocr-structured`, {
           method: 'POST',
           body: formDataB,
         }),
@@ -87,7 +88,7 @@ const CourseRequestForm = () => {
       const structuredDataB = await structuredResponseB.json();
 
       // Step 2: Call structured similarity API with extracted course JSON
-      const similarityResponse = await fetch('http://localhost:3000/api/similarity-embedding-structured', {
+      const similarityResponse = await fetch(`${API_BASE_URL}/api/similarity-embedding-structured`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
