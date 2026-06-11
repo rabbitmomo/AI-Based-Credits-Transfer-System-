@@ -615,7 +615,7 @@ const OfficialApplicationForm = ({ onSubmit }) => {
                             type="text"
                             value={course.gred}
                             onChange={(e) => handleCourseChange(course.id, 'gred', e.target.value)}
-                            placeholder="A/B/C"
+                            placeholder="A"
                             maxLength={1}
                             className="text-center"
                             required
