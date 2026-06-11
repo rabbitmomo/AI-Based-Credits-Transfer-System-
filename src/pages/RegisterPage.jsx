@@ -49,6 +49,17 @@ const RegisterPage = () => {
     setLoading(false);
 
     if (signUpError) {
+      const errorMessage = (signUpError.message || '').toLowerCase();
+      const isEmailRateLimit =
+        errorMessage.includes('email rate') ||
+        errorMessage.includes('rate limit') ||
+        errorMessage.includes('over_email_send_rate_limit');
+
+      if (isEmailRateLimit) {
+        setError('Supabase telah melebihi had penghantaran emel. Tunggu seketika, elakkan cuba daftar berulang kali, atau matikan email confirmation dalam Auth settings semasa ujian.');
+        return;
+      }
+
       setError(signUpError.message || 'Gagal mendaftar ke Supabase');
       return;
     }
@@ -146,6 +157,9 @@ const RegisterPage = () => {
               </Form.Select>
               <small className="text-muted d-block mt-2">
                 Peranan ini akan disimpan dalam metadata akaun Supabase dan digunakan semasa log masuk.
+              </small>
+              <small className="text-muted d-block mt-1">
+                Jika anda sedang ujian, email confirmation yang aktif boleh menyebabkan had emel Supabase dicapai dengan cepat.
               </small>
             </Form.Group>
 

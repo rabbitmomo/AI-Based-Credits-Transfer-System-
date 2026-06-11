@@ -25,7 +25,12 @@ const LoginPage = () => {
       password,
     });
     if (signInResult.error) {
-      setError(signInResult.error.message || 'Gagal log masuk ke Supabase');
+      const isInvalidCredentials = /invalid login credentials/i.test(signInResult.error.message || '');
+      setError(
+        isInvalidCredentials
+          ? 'Emel atau kata laluan tidak tepat. Pastikan akaun tersebut wujud dalam Supabase Auth dan cuba lagi.'
+          : signInResult.error.message || 'Gagal log masuk ke Supabase'
+      );
       return;
     }
     const authUser = signInResult.data?.user || null;
@@ -33,6 +38,7 @@ const LoginPage = () => {
       setError('Sesi Supabase tidak diterima. Sila cuba lagi.');
       return;
     }
+    await supabase.auth.refreshSession().catch(() => null);
     const userData = buildSupabaseProfile(authUser) || {
       id: authUser.id,
       idPengguna: authUser.id,
@@ -94,6 +100,9 @@ const LoginPage = () => {
             </Button>
           </Form>
           <div className="mt-3 d-grid gap-2">
+            <div className="text-muted small text-center">
+              Log masuk menggunakan akaun yang benar-benar wujud dalam Supabase Auth. Jika peranan sudah dikemas kini tetapi kata laluan salah, login tetap akan gagal.
+            </div>
             <Button
               variant="info"
               className="w-100"
@@ -115,6 +124,7 @@ const LoginPage = () => {
                   setError('Sesi Supabase tidak diterima.');
                   return;
                 }
+                await supabase.auth.refreshSession().catch(() => null);
 
                 const userData = buildSupabaseProfile(authUser) || {
                   id: authUser.id,
@@ -150,6 +160,7 @@ const LoginPage = () => {
                   setError('Sesi Supabase tidak diterima.');
                   return;
                 }
+                await supabase.auth.refreshSession().catch(() => null);
 
                 const userData = buildSupabaseProfile(authUser) || {
                   id: authUser.id,

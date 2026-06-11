@@ -58,6 +58,8 @@ const KPDashboard = () => {
     setError('');
 
     try {
+      await supabase.auth.refreshSession().catch(() => null);
+
       const { data: appRows, error: appError } = await supabase
         .from('transfer_credit_applications')
         .select('id, student_id, semester, session, total_diploma_credits, total_degree_credits, status, submitted_at, created_at, updated_at')

@@ -12,7 +12,8 @@ export const AuthProvider = ({ children }) => {
     let mounted = true;
 
     const bootstrapSession = async () => {
-      const { data } = await supabase.auth.getSession();
+      const { data: refreshData } = await supabase.auth.refreshSession().catch(() => ({ data: null }));
+      const { data } = refreshData?.session ? refreshData : await supabase.auth.getSession();
 
       if (!mounted) {
         return;
