@@ -22,7 +22,7 @@ function App() {
           <Route
             path="/student-dashboard"
             element={
-              <ProtectedRoute requiredRole="pelajar">
+              <ProtectedRoute>
                 <StudentDashboard />
               </ProtectedRoute>
             }
@@ -30,7 +30,7 @@ function App() {
           <Route
             path="/student-dashboard/pemindahan-kredit"
             element={
-              <ProtectedRoute requiredRole="pelajar">
+              <ProtectedRoute>
                 <TransferCreditPage />
               </ProtectedRoute>
             }
@@ -38,7 +38,7 @@ function App() {
           <Route
             path="/kp-dashboard"
             element={
-              <ProtectedRoute requiredRole="ketua_program">
+              <ProtectedRoute>
                 <KPDashboard />
               </ProtectedRoute>
             }
@@ -46,7 +46,7 @@ function App() {
           <Route
             path="/admin-dashboard"
             element={
-              <ProtectedRoute requiredRole="pentadbir">
+              <ProtectedRoute>
                 <AdminDashboard />
               </ProtectedRoute>
             }
