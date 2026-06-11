@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Container, Row, Col, Form, Button, Alert } from 'react-bootstrap';
 import { supabase } from '../lib/supabaseClient';
-import { buildSupabaseProfile, resolveRoleRoute } from '../lib/authProfile';
+import { buildSupabaseProfile } from '../lib/authProfile';
 import '../styles/Login.css';
 
 const LoginPage = () => {
@@ -44,10 +44,9 @@ const LoginPage = () => {
       idPengguna: authUser.id,
       namaPengguna: email.split('@')[0],
       emel: authUser.email || email,
-      peranan: 'pelajar',
     };
     login(userData);
-    navigate(resolveRoleRoute(userData.peranan));
+    navigate('/student-dashboard');
   };
   return (
     <div className="login-container">
@@ -130,11 +129,10 @@ const LoginPage = () => {
                   id: authUser.id,
                   idPengguna: authUser.id,
                   namaPengguna: 'kp-admin',
-                  emel: authUser.email || emailValue,
-                  peranan: 'ketua_program',
+                    emel: authUser.email || emailValue,
                 };
                 login(userData);
-                navigate(resolveRoleRoute(userData.peranan));
+                navigate('/kp-dashboard');
               }}
             >
               <i className="bi bi-person-badge me-2"></i>Log Masuk Sebagai Ketua Program
@@ -167,10 +165,9 @@ const LoginPage = () => {
                   idPengguna: authUser.id,
                   namaPengguna: 'admin-user',
                   emel: authUser.email || emailValue,
-                  peranan: 'pentadbir',
                 };
                 login(userData);
-                navigate(resolveRoleRoute(userData.peranan));
+                navigate('/admin-dashboard');
               }}
             >
               <i className="bi bi-shield-lock me-2"></i>Log Masuk Sebagai Pentadbir

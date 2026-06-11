@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Container, Form, Button, Alert } from 'react-bootstrap';
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
-import { buildSupabaseProfile, resolveRoleRoute } from '../lib/authProfile';
+import { buildSupabaseProfile } from '../lib/authProfile';
 import '../styles/Login.css';
 
 const RegisterPage = () => {
@@ -11,7 +11,6 @@ const RegisterPage = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [role, setRole] = useState('pelajar');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
@@ -41,7 +40,6 @@ const RegisterPage = () => {
       options: {
         data: {
           full_name: fullName,
-          peranan: role,
         },
       },
     });
@@ -72,14 +70,13 @@ const RegisterPage = () => {
         idPengguna: authUser.id,
         namaPengguna: fullName,
         emel: authUser.email || email,
-        peranan: role,
       };
 
       login(userData);
 
       setSuccess('Pendaftaran berjaya. Anda kini telah log masuk.');
 
-      navigate(resolveRoleRoute(userData.peranan));
+      navigate('/student-dashboard');
       return;
     }
 
@@ -143,28 +140,6 @@ const RegisterPage = () => {
 
             <Form.Group className="mb-3">
               <Form.Label className="form-label-login">
-                <i className="bi bi-shield-lock me-2"></i>Peranan
-              </Form.Label>
-              <Form.Select
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
-                className="form-control-login"
-                required
-              >
-                <option value="pelajar">Pelajar</option>
-                <option value="ketua_program">Ketua Program</option>
-                <option value="pentadbir">Pentadbir</option>
-              </Form.Select>
-              <small className="text-muted d-block mt-2">
-                Peranan ini akan disimpan dalam metadata akaun Supabase dan digunakan semasa log masuk.
-              </small>
-              <small className="text-muted d-block mt-1">
-                Jika anda sedang ujian, email confirmation yang aktif boleh menyebabkan had emel Supabase dicapai dengan cepat.
-              </small>
-            </Form.Group>
-
-            <Form.Group className="mb-3">
-              <Form.Label className="form-label-login">
                 <i className="bi bi-lock me-2"></i>Kata Laluan
               </Form.Label>
               <Form.Control
@@ -195,11 +170,7 @@ const RegisterPage = () => {
               <i className="bi bi-person-plus me-2"></i>
               {loading
                 ? 'Mendaftar...'
-                : role === 'ketua_program'
-                  ? 'Daftar Akaun Ketua Program'
-                  : role === 'pentadbir'
-                    ? 'Daftar Akaun Pentadbir'
-                    : 'Daftar Akaun Pelajar'}
+                : 'Daftar Akaun'}
             </Button>
           </Form>
 
