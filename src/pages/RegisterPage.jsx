@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Container, Form, Button, Alert } from 'react-bootstrap';
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
+import { buildSupabaseProfile, resolveRoleRoute } from '../lib/authProfile';
 import '../styles/Login.css';
 
 const RegisterPage = () => {
@@ -55,27 +56,19 @@ const RegisterPage = () => {
     const authUser = data.session?.user || data.user || null;
 
     if (authUser) {
-      login({
+      const userData = buildSupabaseProfile(authUser) || {
         id: authUser.id,
         idPengguna: authUser.id,
-        namaPengguna: authUser.user_metadata?.full_name || fullName,
+        namaPengguna: fullName,
         emel: authUser.email || email,
-        peranan: authUser.user_metadata?.peranan || role,
-      });
+        peranan: role,
+      };
+
+      login(userData);
 
       setSuccess('Pendaftaran berjaya. Anda kini telah log masuk.');
 
-      if (role === 'ketua_program') {
-        navigate('/kp-dashboard');
-        return;
-      }
-
-      if (role === 'pentadbir') {
-        navigate('/admin-dashboard');
-        return;
-      }
-
-      navigate('/student-dashboard');
+      navigate(resolveRoleRoute(userData.peranan));
       return;
     }
 
@@ -151,6 +144,9 @@ const RegisterPage = () => {
                 <option value="ketua_program">Ketua Program</option>
                 <option value="pentadbir">Pentadbir</option>
               </Form.Select>
+              <small className="text-muted d-block mt-2">
+                Peranan ini akan disimpan dalam metadata akaun Supabase dan digunakan semasa log masuk.
+              </small>
             </Form.Group>
 
             <Form.Group className="mb-3">
@@ -183,7 +179,13 @@ const RegisterPage = () => {
 
             <Button variant="primary" type="submit" className="login-button w-100" disabled={loading}>
               <i className="bi bi-person-plus me-2"></i>
-              {loading ? 'Mendaftar...' : 'Daftar Akaun'}
+              {loading
+                ? 'Mendaftar...'
+                : role === 'ketua_program'
+                  ? 'Daftar Akaun Ketua Program'
+                  : role === 'pentadbir'
+                    ? 'Daftar Akaun Pentadbir'
+                    : 'Daftar Akaun Pelajar'}
             </Button>
           </Form>
 

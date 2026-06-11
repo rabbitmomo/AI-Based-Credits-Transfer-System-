@@ -7,6 +7,12 @@ const OfficialApplicationForm = ({ onSubmit }) => {
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://ai-based-credits-transfer-system-production.up.railway.app';
   const { user } = useAuth();
 
+  const mapOcrCourseFields = (structuredData) => ({
+    kursus: String(structuredData?.course_code || '').trim(),
+    nama: String(structuredData?.course_name || '').trim(),
+    kredit: Number.isFinite(Number(structuredData?.credits)) ? Number(structuredData.credits) : 0,
+  });
+
   const [formData, setFormData] = useState({
     noMatrik: '',
     nama: '',
@@ -112,6 +118,26 @@ const OfficialApplicationForm = ({ onSubmit }) => {
 
       const ocrSetaraData = await ocrSetaraResponse.json();
       console.log(`[Step 4/4] OCR Setara Success:`, ocrSetaraData?.data?.course_code);
+
+      const diplomaFields = mapOcrCourseFields(ocrDiplomaData?.data);
+      const setaraFields = mapOcrCourseFields(ocrSetaraData?.data);
+
+      setFormData(prev => ({
+        ...prev,
+        courses: prev.courses.map(course =>
+          course.id === courseId
+            ? {
+                ...course,
+                kursusDiploma: diplomaFields.kursus,
+                namaDiploma: diplomaFields.nama,
+                kreditDiploma: diplomaFields.kredit,
+                kursusSetara: setaraFields.kursus,
+                namaSetara: setaraFields.nama,
+                kreditSetara: setaraFields.kredit,
+              }
+            : course,
+        ),
+      }));
 
       console.log(`[Similarity] Calling similarity analysis...`);
       const similarityResponse = await fetch(`${API_BASE_URL}/api/similarity-embedding-structured`, {

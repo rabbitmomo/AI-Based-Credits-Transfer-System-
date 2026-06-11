@@ -1,23 +1,8 @@
 import React, { createContext, useEffect, useState, useContext } from 'react';
 import { supabase } from '../lib/supabaseClient';
+import { buildSupabaseProfile, normalizeAppUser } from '../lib/authProfile';
 
 const AuthContext = createContext();
-
-const buildUserProfile = (supabaseUser) => {
-  if (!supabaseUser) {
-    return null;
-  }
-
-  const fallbackName = supabaseUser.email ? supabaseUser.email.split('@')[0] : 'user';
-
-  return {
-    id: supabaseUser.id,
-    idPengguna: supabaseUser.id,
-    namaPengguna: supabaseUser.user_metadata?.full_name || fallbackName,
-    emel: supabaseUser.email || '',
-    peranan: supabaseUser.user_metadata?.peranan || 'pelajar',
-  };
-};
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -34,7 +19,7 @@ export const AuthProvider = ({ children }) => {
       }
 
       const sessionUser = data.session?.user || null;
-      const profile = buildUserProfile(sessionUser);
+      const profile = buildSupabaseProfile(sessionUser);
 
       setUser(profile);
       setIsAuthenticated(Boolean(profile));
@@ -43,7 +28,7 @@ export const AuthProvider = ({ children }) => {
     bootstrapSession();
 
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
-      const profile = buildUserProfile(session?.user || null);
+      const profile = buildSupabaseProfile(session?.user || null);
 
       setUser(profile);
       setIsAuthenticated(Boolean(profile));
@@ -61,11 +46,7 @@ export const AuthProvider = ({ children }) => {
   }, []);
 
   const login = (userData) => {
-    const normalizedUser = {
-      ...userData,
-      id: userData?.id || userData?.idPengguna || null,
-      idPengguna: userData?.idPengguna || userData?.id || null,
-    };
+    const normalizedUser = normalizeAppUser(userData);
 
     setUser(normalizedUser);
     setIsAuthenticated(true);

@@ -49,6 +49,41 @@ const uploadSupportingDocument = async ({ userId, applicationId, documentType, f
   };
 };
 
+const uploadCourseDocument = async ({ userId, applicationId, courseNo, documentSide, courseCode, file }) => {
+  const storagePath = buildStoragePath({
+    userId,
+    applicationId,
+    documentType: `course-${documentSide}-course-${courseNo}`,
+    fileName: file.name,
+  });
+
+  const { error: uploadError } = await supabase.storage
+    .from(DOCUMENT_BUCKET)
+    .upload(storagePath, file, {
+      contentType: file.type,
+      upsert: false,
+    });
+
+  if (uploadError) {
+    throw new Error(
+      `Gagal memuat naik PDF kursus "${documentSide}" untuk kursus ${courseNo} ke Supabase Storage. Pastikan bucket "${DOCUMENT_BUCKET}" sudah wujud dan boleh diakses.`,
+    );
+  }
+
+  const { data } = supabase.storage.from(DOCUMENT_BUCKET).getPublicUrl(storagePath);
+
+  return {
+    application_id: applicationId,
+    course_no: courseNo,
+    document_side: documentSide,
+    course_code: toNullableText(courseCode),
+    file_name: file.name,
+    file_url: data.publicUrl,
+    mime_type: file.type || null,
+    file_size: file.size || null,
+  };
+};
+
 const mapAnalysisResult = (analysis, course) => ({
   similarity_score: course.skorKesamaan === null || course.skorKesamaan === undefined
     ? 0
@@ -175,6 +210,39 @@ export const saveTransferCreditApplication = async ({
 
       if (analysisError) {
         throw new Error(analysisError.message);
+      }
+
+      const courseDocumentEntries = [];
+      const courseFiles = [
+        ['diploma', course.pdfDiploma],
+        ['degree', course.pdfSetara],
+      ];
+
+      for (const [documentSide, file] of courseFiles) {
+        if (!file) {
+          continue;
+        }
+
+        const uploadedCourseDocument = await uploadCourseDocument({
+          userId,
+          applicationId: application.id,
+          courseNo: index + 1,
+          documentSide,
+          courseCode: documentSide === 'diploma' ? course.kursusDiploma : course.kursusSetara,
+          file,
+        });
+
+        courseDocumentEntries.push(uploadedCourseDocument);
+      }
+
+      if (courseDocumentEntries.length > 0) {
+        const { error: courseDocumentError } = await supabase
+          .from('course_documents')
+          .insert(courseDocumentEntries);
+
+        if (courseDocumentError) {
+          throw new Error(courseDocumentError.message);
+        }
       }
     }
 

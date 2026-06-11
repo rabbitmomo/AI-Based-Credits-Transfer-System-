@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Container, Row, Col, Form, Button, Alert } from 'react-bootstrap';
 import { supabase } from '../lib/supabaseClient';
+import { buildSupabaseProfile, resolveRoleRoute } from '../lib/authProfile';
 import '../styles/Login.css';
 
 const LoginPage = () => {
@@ -32,23 +33,15 @@ const LoginPage = () => {
       setError('Sesi Supabase tidak diterima. Sila cuba lagi.');
       return;
     }
-    const role = authUser.user_metadata?.peranan || 'pelajar';
-    const profileName = authUser.user_metadata?.full_name || email.split('@')[0];
-    const userData = {
+    const userData = buildSupabaseProfile(authUser) || {
       id: authUser.id,
       idPengguna: authUser.id,
-      namaPengguna: profileName,
+      namaPengguna: email.split('@')[0],
       emel: authUser.email || email,
-      peranan: role,
+      peranan: 'pelajar',
     };
     login(userData);
-    if (role === 'pelajar') {
-      navigate('/student-dashboard');
-    } else if (role === 'ketua_program') {
-      navigate('/kp-dashboard');
-    } else {
-      navigate('/admin-dashboard');
-    }
+    navigate(resolveRoleRoute(userData.peranan));
   };
   return (
     <div className="login-container">
@@ -123,14 +116,15 @@ const LoginPage = () => {
                   return;
                 }
 
-                login({
+                const userData = buildSupabaseProfile(authUser) || {
                   id: authUser.id,
                   idPengguna: authUser.id,
-                  namaPengguna: authUser.user_metadata?.full_name || 'kp-admin',
+                  namaPengguna: 'kp-admin',
                   emel: authUser.email || emailValue,
-                  peranan: authUser.user_metadata?.peranan || 'ketua_program',
-                });
-                navigate('/kp-dashboard');
+                  peranan: 'ketua_program',
+                };
+                login(userData);
+                navigate(resolveRoleRoute(userData.peranan));
               }}
             >
               <i className="bi bi-person-badge me-2"></i>Log Masuk Sebagai Ketua Program
@@ -157,14 +151,15 @@ const LoginPage = () => {
                   return;
                 }
 
-                login({
+                const userData = buildSupabaseProfile(authUser) || {
                   id: authUser.id,
                   idPengguna: authUser.id,
-                  namaPengguna: authUser.user_metadata?.full_name || 'admin-user',
+                  namaPengguna: 'admin-user',
                   emel: authUser.email || emailValue,
-                  peranan: authUser.user_metadata?.peranan || 'pentadbir',
-                });
-                navigate('/admin-dashboard');
+                  peranan: 'pentadbir',
+                };
+                login(userData);
+                navigate(resolveRoleRoute(userData.peranan));
               }}
             >
               <i className="bi bi-shield-lock me-2"></i>Log Masuk Sebagai Pentadbir
