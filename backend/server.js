@@ -1476,7 +1476,7 @@ app.post('/api/diploma-by-code', async (req, res) => {
     });
   }
 });
-
+//
 app.get('/api/degree-courses', async (req, res) => {
   try {
     dotenv.config({ path: ENV_PATH, override: true });
