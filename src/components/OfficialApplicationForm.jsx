@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Form, Button, Alert, Row, Col, Card, Badge, Table, Modal, Accordion, Tabs, Tab } from 'react-bootstrap';
 import { useAuth } from '../context/AuthContext';
 import { saveTransferCreditApplication } from '../services/transferCreditApplicationService';
@@ -55,6 +55,29 @@ const OfficialApplicationForm = ({ onSubmit }) => {
   const [analyzingCourseIds, setAnalyzingCourseIds] = useState([]);
   const [analysisMessage, setAnalysisMessage] = useState({ type: '', text: '' });
   const [analysisResults, setAnalysisResults] = useState({});
+  const [degreeCourses, setDegreeCourses] = useState([]);
+
+  useEffect(() => {
+    const loadDegreeCourses = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/degree-courses`);
+
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = await response.json();
+        setDegreeCourses(Array.isArray(payload?.data) ? payload.data : []);
+      } catch (fetchError) {
+        console.error('Failed to fetch degree courses:', fetchError);
+      }
+    };
+
+    loadDegreeCourses();
+  }, [API_BASE_URL]);
+
+  const getDegreeCourseByCode = (courseCode) =>
+    degreeCourses.find((course) => String(course.course_code || '').trim() === String(courseCode || '').trim());
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -223,6 +246,26 @@ const OfficialApplicationForm = ({ onSubmit }) => {
   };
 
   const handleCourseChange = (id, field, value) => {
+    if (field === 'kursusSetara') {
+      const selectedDegreeCourse = getDegreeCourseByCode(value);
+
+      setFormData(prev => ({
+        ...prev,
+        courses: prev.courses.map(course => (
+          course.id === id
+            ? {
+                ...course,
+                kursusSetara: value,
+                namaSetara: selectedDegreeCourse?.course_name || '',
+                kreditSetara: selectedDegreeCourse?.credits ?? 0,
+              }
+            : course
+        )),
+      }));
+
+      return;
+    }
+
     setFormData(prev => ({
       ...prev,
       courses: prev.courses.map(course =>
@@ -659,14 +702,19 @@ const OfficialApplicationForm = ({ onSubmit }) => {
                           />
                         </td>
                         <td>
-                          <Form.Control
+                          <Form.Select
                             size="sm"
-                            type="text"
                             value={course.kursusSetara}
                             onChange={(e) => handleCourseChange(course.id, 'kursusSetara', e.target.value)}
-                            placeholder="Kod"
                             required
-                          />
+                          >
+                            <option value="">Pilih kod kursus</option>
+                            {degreeCourses.map((degreeCourse) => (
+                              <option key={degreeCourse.id || degreeCourse.course_code} value={degreeCourse.course_code}>
+                                {degreeCourse.course_code} - {degreeCourse.course_name}
+                              </option>
+                            ))}
+                          </Form.Select>
                         </td>
                         <td>
                           <Form.Control
@@ -676,6 +724,7 @@ const OfficialApplicationForm = ({ onSubmit }) => {
                             onChange={(e) => handleCourseChange(course.id, 'namaSetara', e.target.value)}
                             placeholder="Nama"
                             style={{ minWidth: '220px' }}
+                            readOnly
                             required
                           />
                         </td>
@@ -687,6 +736,7 @@ const OfficialApplicationForm = ({ onSubmit }) => {
                             onChange={(e) => handleCourseChange(course.id, 'kreditSetara', e.target.value)}
                             placeholder="0"
                             className="text-center"
+                            readOnly
                             required
                           />
                         </td>

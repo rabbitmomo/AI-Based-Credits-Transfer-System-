@@ -1481,11 +1481,7 @@ app.get('/api/degree-courses', async (req, res) => {
   try {
     dotenv.config({ path: ENV_PATH, override: true });
 
-    if (!supabaseAdmin) {
-      return res.status(500).json({
-        error: 'Missing VITE_SUPABASE_SERVICE_ROLE_KEY in backend environment variables',
-      });
-    }
+    const degreeSupabase = supabase;
 
     const { data, error } = await supabaseAdmin
       .from('degree_table4')
@@ -1525,12 +1521,6 @@ app.post('/api/degree-by-code', async (req, res) => {
       });
     }
 
-    if (!supabaseAdmin) {
-      return res.status(500).json({
-        error: 'Missing VITE_SUPABASE_SERVICE_ROLE_KEY in backend environment variables',
-      });
-    }
-
     const normalizeCourseCode = (value) =>
       String(value || '')
         .toUpperCase()
@@ -1539,7 +1529,7 @@ app.post('/api/degree-by-code', async (req, res) => {
 
     const requestedCourseCode = normalizeCourseCode(courseCodeInput);
 
-    const { data: degreeRows, error: selectError } = await supabaseAdmin
+    const { data: degreeRows, error: selectError } = await supabase
       .from('degree_table4')
       .select('*');
 
