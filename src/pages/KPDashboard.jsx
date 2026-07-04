@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Container, Row, Col, Card, Button, Badge, Modal, Table, Spinner, Alert } from 'react-bootstrap';
+import { jsPDF } from 'jspdf';
 import { supabase } from '../lib/supabaseClient';
 import { useAuth } from '../context/AuthContext';
 
@@ -45,6 +46,151 @@ const formatScore = (value) => {
   return `${numericValue.toFixed(2)}%`;
 };
 
+const STATUS_LABELS_BY_VALUE = {
+  approved: 'Diluluskan',
+  rejected: 'Ditolak',
+  submitted: 'Menunggu Kelulusan KP',
+  pending_analysis: 'Belum Dianalisis',
+  draft: 'Draf',
+};
+
+const getReportDate = () => new Date().toLocaleString('ms-MY');
+
+const ensurePdfSpace = (doc, cursorY, requiredSpace, margin = 15) => {
+  const pageHeight = doc.internal.pageSize.getHeight();
+  if (cursorY + requiredSpace <= pageHeight - margin) {
+    return cursorY;
+  }
+
+  doc.addPage();
+  return margin;
+};
+
+const addReportHeader = (doc, title, subtitle) => {
+  const pageWidth = doc.internal.pageSize.getWidth();
+
+  doc.setFillColor(102, 126, 234);
+  doc.rect(0, 0, pageWidth, 28, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(16);
+  doc.setFont('helvetica', 'bold');
+  doc.text(title, 15, 15);
+  doc.setFontSize(10);
+  doc.setFont('helvetica', 'normal');
+  doc.text(subtitle, 15, 22);
+  doc.setTextColor(0, 0, 0);
+};
+
+const addSectionTitle = (doc, title, cursorY) => {
+  const nextY = ensurePdfSpace(doc, cursorY, 12);
+  doc.setFillColor(243, 244, 246);
+  doc.rect(15, nextY - 4, 180, 8, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.text(title, 17, nextY + 1);
+  doc.setFont('helvetica', 'normal');
+  return nextY + 8;
+};
+
+const addKeyValueRows = (doc, rows, cursorY) => {
+  const leftX = 15;
+  const valueX = 70;
+  const maxValueWidth = 125;
+
+  rows.forEach(([label, value]) => {
+    const text = value === null || value === undefined || value === '' ? '-' : String(value);
+    const wrapped = doc.splitTextToSize(text, maxValueWidth);
+    const rowHeight = Math.max(6, wrapped.length * 5);
+    cursorY = ensurePdfSpace(doc, cursorY, rowHeight + 2);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`${label}:`, leftX, cursorY);
+    doc.setFont('helvetica', 'normal');
+    doc.text(wrapped, valueX, cursorY);
+    cursorY += rowHeight;
+  });
+
+  return cursorY;
+};
+
+const createPdfLinkCell = (text, url) => ({
+  text,
+  url,
+});
+
+const addSimpleTable = (doc, headers, rows, cursorY, options = {}) => {
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const margin = 15;
+  const usableWidth = pageWidth - margin * 2;
+  const columnWidths = options.columnWidths || headers.map(() => usableWidth / headers.length);
+  const fontSize = options.fontSize || 9;
+  const lineHeight = options.lineHeight || 4.5;
+
+  const totalHeaderHeight = 8;
+  const estimatedRowsHeight = rows.reduce((total, row) => {
+    const rowHeight = row.reduce((maxHeight, cell, index) => {
+      const cellText = cell === null || cell === undefined ? '-' : String(cell);
+      const wrapped = doc.splitTextToSize(cellText, Math.max(10, columnWidths[index] - 3));
+      return Math.max(maxHeight, Math.max(8, wrapped.length * lineHeight + 2));
+    }, 8);
+    return total + rowHeight;
+  }, totalHeaderHeight);
+
+  cursorY = ensurePdfSpace(doc, cursorY, estimatedRowsHeight + 6);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(fontSize);
+
+  headers.forEach((header, index) => {
+    const x = margin + columnWidths.slice(0, index).reduce((sum, width) => sum + width, 0);
+    const columnWidth = columnWidths[index];
+    doc.rect(x, cursorY, columnWidth, 8);
+    doc.text(String(header), x + 1.5, cursorY + 5.5, { maxWidth: columnWidth - 3 });
+  });
+
+  cursorY += 8;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(fontSize);
+
+  rows.forEach((row) => {
+    const cellInfos = row.map((cell, index) => {
+      const columnWidth = columnWidths[index];
+      const cellText = cell && typeof cell === 'object' && 'text' in cell ? cell.text : cell === null || cell === undefined || cell === '' ? '-' : String(cell);
+      const wrappedText = doc.splitTextToSize(cellText, Math.max(10, columnWidth - 3));
+      return {
+        columnWidth,
+        wrappedText,
+        cellHeight: Math.max(8, wrappedText.length * lineHeight + 2),
+        linkUrl: cell && typeof cell === 'object' && 'url' in cell ? cell.url : null,
+      };
+    });
+
+    const rowHeight = cellInfos.reduce((maxHeight, info) => Math.max(maxHeight, info.cellHeight), 8);
+    cursorY = ensurePdfSpace(doc, cursorY, rowHeight + 2);
+
+    let cellX = margin;
+    row.forEach((cell, index) => {
+      const info = cellInfos[index];
+      doc.rect(cellX, cursorY, info.columnWidth, rowHeight);
+      if (info.linkUrl) {
+        doc.setTextColor(17, 85, 204);
+        doc.setFont('helvetica', 'underline');
+      }
+      const textY = cursorY + 5.5;
+      doc.text(info.wrappedText, cellX + 1.5, textY);
+      if (info.linkUrl) {
+        doc.link(cellX, cursorY, info.columnWidth, rowHeight, { url: info.linkUrl });
+        doc.setTextColor(0, 0, 0);
+        doc.setFont('helvetica', 'normal');
+      }
+      cellX += info.columnWidth;
+    });
+    cursorY += rowHeight;
+  });
+
+  return cursorY + 2;
+};
+
+const getApiBaseUrl = () => import.meta.env.VITE_API_BASE_URL || 'https://ai-based-credits-transfer-system-production.up.railway.app';
+
 const KPDashboard = () => {
   const { user } = useAuth();
   const [applications, setApplications] = useState([]);
@@ -58,6 +204,9 @@ const KPDashboard = () => {
   const [analysisArtifacts, setAnalysisArtifacts] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [approvalLoading, setApprovalLoading] = useState(false);
+  const [approvalError, setApprovalError] = useState('');
+  const [includeAIInReport, setIncludeAIInReport] = useState(false);
 
   const loadApplications = async () => {
     setLoading(true);
@@ -267,6 +416,237 @@ const KPDashboard = () => {
     return new File([blob], fileName || 'document.pdf', { type: blob.type || 'application/pdf' });
   };
 
+  const runCourseAnalysis = async (course) => {
+    if (!course?.diplomaPdf || !course?.degreePdf) {
+      return null;
+    }
+
+    const apiBaseUrl = getApiBaseUrl();
+    const diplomaFile = await fetchPdfAsFile(course.diplomaPdf.file_url, course.diplomaPdf.file_name);
+    const degreeFile = await fetchPdfAsFile(course.degreePdf.file_url, course.degreePdf.file_name);
+
+    const diplomaFormData = new FormData();
+    diplomaFormData.append('file', diplomaFile);
+
+    const degreeFormData = new FormData();
+    degreeFormData.append('file', degreeFile);
+
+    const [ocrDiplomaResponse, ocrDegreeResponse] = await Promise.all([
+      fetch(`${apiBaseUrl}/api/pdf-ocr-structured`, {
+        method: 'POST',
+        body: diplomaFormData,
+      }),
+      fetch(`${apiBaseUrl}/api/pdf-ocr-structured`, {
+        method: 'POST',
+        body: degreeFormData,
+      }),
+    ]);
+
+    if (!ocrDiplomaResponse.ok || !ocrDegreeResponse.ok) {
+      throw new Error('Gagal mengekstrak OCR berstruktur bagi PDF kursus');
+    }
+
+    const ocrDiplomaData = await ocrDiplomaResponse.json();
+    const ocrDegreeData = await ocrDegreeResponse.json();
+
+    const similarityResponse = await fetch(`${apiBaseUrl}/api/similarity-embedding-structured`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        courseA: ocrDiplomaData.data,
+        courseB: ocrDegreeData.data,
+      }),
+    });
+
+    if (!similarityResponse.ok) {
+      const similarityError = await similarityResponse.json().catch(() => ({}));
+      throw new Error(similarityError.error || similarityError.details || 'Gagal menjalankan analisis AI');
+    }
+
+    const similarityData = await similarityResponse.json();
+    const score = (similarityData.evaluation?.final_score || 0) * 100;
+    const confidence = (similarityData.evaluation?.confidence || 0) * 100;
+    const decision = similarityData.evaluation?.decision || '-';
+
+    return {
+      courseNo: course.courseNo,
+      score,
+      confidence,
+      decision,
+      analysisResult: similarityData,
+      analysisArtifacts: {
+        diploma: ocrDiplomaData.data,
+        degree: ocrDegreeData.data,
+      },
+    };
+  };
+
+  const buildReportAnalysisRows = async (app) => {
+    const rows = [];
+
+    for (const course of app.courses || []) {
+      const analysisRow = await runCourseAnalysis(course);
+      if (analysisRow) {
+        rows.push(analysisRow);
+      }
+    }
+
+    return rows;
+  };
+
+  const generateOfficialReport = async (app, decision, analysisRows = []) => {
+    const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const analysisMap = new Map(analysisRows.map((row) => [row.courseNo, row]));
+
+    addReportHeader(
+      doc,
+      'LAPORAN RASMI PERMOHONAN PEMINDAHAN KREDIT',
+      `Permohonan ID: ${app.idPermohonan} | Tarikh laporan: ${getReportDate()}`
+    );
+
+    let cursorY = 38;
+
+    cursorY = addSectionTitle(doc, 'Maklumat Keputusan', cursorY);
+    cursorY = addKeyValueRows(doc, [
+      ['Permohonan ID', app.idPermohonan],
+      ['No. Matrik', app.idPelajar],
+      ['Nama Pelajar', app.namaPelajar],
+      ['Status Keputusan', STATUS_LABELS_BY_VALUE[decision] || decision],
+      ['Tarikh Hantar', app.tarikhHantar],
+    ], cursorY + 2);
+
+    cursorY = addSectionTitle(doc, 'A. Maklumat Peribadi Pelajar', cursorY + 4);
+    cursorY = addKeyValueRows(doc, [
+      ['No. Matrik', app.idPelajar],
+      ['Nama Pelajar', app.namaPelajar],
+      ['Fakulti', app.fakulti],
+      ['Program', app.program],
+      ['Semester / Sesi', `Semester ${app.semester} / ${app.session}`],
+      ['Emel Pelajar', app.email],
+    ], cursorY + 2);
+
+    cursorY = addSectionTitle(doc, 'B. Senarai Kursus Yang Dimohon', cursorY + 4);
+    const courseRows = (app.courses || []).map((course) => {
+      const freshAnalysis = analysisMap.get(course.courseNo);
+      const score = freshAnalysis ? freshAnalysis.score : course.skorKesamaan;
+      const finalDecision = freshAnalysis ? freshAnalysis.decision : course.decision;
+
+      return [
+        course.courseNo,
+        course.diploma?.course_code || '-',
+        course.diploma?.course_name || '-',
+        course.degree?.course_code || '-',
+        course.degree?.course_name || '-',
+        formatScore(score),
+        finalDecision || '-',
+      ];
+    });
+    cursorY = addSimpleTable(
+      doc,
+      ['No.', 'Kod Diploma', 'Nama Diploma', 'Kod Degree', 'Nama Degree', 'Skor', 'Keputusan'],
+      courseRows,
+      cursorY + 2,
+      {
+        columnWidths: [10, 22, 40, 22, 40, 18, 23],
+        fontSize: 8.5,
+        lineHeight: 4.2,
+      }
+    );
+
+    cursorY = addSectionTitle(doc, 'C. Dokumen Sokongan', cursorY + 4);
+    const supportDocumentRows = [
+      ['Transkrip Akademik', app.supportDocuments.find((docItem) => docItem.document_type === 'transkrip')],
+      ['Sinopsis Kursus', app.supportDocuments.find((docItem) => docItem.document_type === 'sinopsis')],
+      ['Resit Bayaran', app.supportDocuments.find((docItem) => docItem.document_type === 'bayaran')],
+    ].map(([label, docItem]) => [
+      label,
+      docItem?.file_url ? createPdfLinkCell(docItem.file_name || '-', docItem.file_url) : (docItem?.file_name || '-'),
+    ]);
+    cursorY = addSimpleTable(
+      doc,
+      ['Jenis Dokumen', 'Nama Fail'],
+      supportDocumentRows,
+      cursorY + 2,
+      {
+        columnWidths: [52, 128],
+        fontSize: 8.5,
+        lineHeight: 4.2,
+      }
+    );
+
+    cursorY = addSectionTitle(doc, 'D. Dokumen Kursus Yang Dimuat Naik', cursorY + 4);
+    const uploadedCourseRows = (app.courseDocuments || []).map((docItem) => [
+      docItem.course_no,
+      docItem.document_side,
+      docItem.course_code || '-',
+      docItem.file_url ? createPdfLinkCell(docItem.file_name || '-', docItem.file_url) : (docItem.file_name || '-'),
+    ]);
+    cursorY = addSimpleTable(
+      doc,
+      ['No.', 'Jenis', 'Kod Kursus', 'Nama Fail'],
+      uploadedCourseRows.length > 0 ? uploadedCourseRows : [['-', '-', '-', '-']],
+      cursorY + 2,
+      {
+        columnWidths: [12, 22, 28, 118],
+        fontSize: 8.5,
+        lineHeight: 4.2,
+      }
+    );
+
+    if (analysisRows.length > 0) {
+      cursorY = addSectionTitle(doc, 'E. Hasil Analisis AI', cursorY + 4);
+
+      for (const row of analysisRows) {
+        cursorY = ensurePdfSpace(doc, cursorY, 45);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text(`Kursus No. ${row.courseNo}`, 15, cursorY);
+        cursorY += 5;
+
+        cursorY = addKeyValueRows(doc, [
+          ['Skor Kesamaan', formatScore(row.score)],
+          ['Keyakinan AI', `${Number(row.confidence || 0).toFixed(2)}%`],
+          ['Keputusan', row.decision || '-'],
+          ['Kod Diploma', row.analysisArtifacts?.diploma?.course_code || '-'],
+          ['Nama Diploma', row.analysisArtifacts?.diploma?.course_name || '-'],
+          ['Kod Degree', row.analysisArtifacts?.degree?.course_code || '-'],
+          ['Nama Degree', row.analysisArtifacts?.degree?.course_name || '-'],
+          ['Kredit Diploma', row.analysisArtifacts?.diploma?.credits ?? '-'],
+          ['Kredit Degree', row.analysisArtifacts?.degree?.credits ?? '-'],
+        ], cursorY + 1);
+
+        const synopsisText = row.analysisArtifacts?.diploma?.synopsis || '-';
+        const degreeSynopsisText = row.analysisArtifacts?.degree?.synopsis || '-';
+        cursorY = addKeyValueRows(doc, [
+          ['Synopsis Diploma', synopsisText],
+          ['Synopsis Degree', degreeSynopsisText],
+        ], cursorY + 1);
+
+        const fieldsAvailable = row.analysisResult?.fields_available || [];
+        cursorY = addKeyValueRows(doc, [
+          ['Bidang Dibandingkan', fieldsAvailable.length > 0 ? fieldsAvailable.join(', ') : '-'],
+        ], cursorY + 1);
+
+        cursorY = ensurePdfSpace(doc, cursorY, 18);
+      }
+    }
+
+    cursorY = ensurePdfSpace(doc, cursorY, 18);
+    doc.setDrawColor(180, 180, 180);
+    doc.line(15, cursorY, pageWidth - 15, cursorY);
+    cursorY += 8;
+    doc.setFontSize(10);
+    doc.text(`Status permohonan: ${app.statusPermohonan}`, 15, cursorY);
+    cursorY += 5;
+    doc.text(`Dijana oleh Ketua Program: ${user?.namaPengguna || 'Sistem'}`, 15, cursorY);
+
+    const safeName = String(app.idPermohonan || 'laporan').replace(/[^a-z0-9_-]/gi, '_');
+    doc.save(`laporan-permohonan-${safeName}-${decision}.pdf`);
+  };
+
   const handleRunAnalysis = async () => {
     if (!selectedCourseAnalysis?.diplomaPdf || !selectedCourseAnalysis?.degreePdf) {
       setAnalysisError('PDF diploma dan PDF degree mesti wujud sebelum analisis boleh dijalankan.');
@@ -279,58 +659,41 @@ const KPDashboard = () => {
     setAnalysisArtifacts(null);
 
     try {
-      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'https://ai-based-credits-transfer-system-production.up.railway.app';
-
-      const diplomaFile = await fetchPdfAsFile(selectedCourseAnalysis.diplomaPdf.file_url, selectedCourseAnalysis.diplomaPdf.file_name);
-      const degreeFile = await fetchPdfAsFile(selectedCourseAnalysis.degreePdf.file_url, selectedCourseAnalysis.degreePdf.file_name);
-
-      const diplomaFormData = new FormData();
-      diplomaFormData.append('file', diplomaFile);
-
-      const degreeFormData = new FormData();
-      degreeFormData.append('file', degreeFile);
-
-      const [ocrDiplomaResponse, ocrDegreeResponse] = await Promise.all([
-        fetch(`${apiBaseUrl}/api/pdf-ocr-structured`, {
-          method: 'POST',
-          body: diplomaFormData,
-        }),
-        fetch(`${apiBaseUrl}/api/pdf-ocr-structured`, {
-          method: 'POST',
-          body: degreeFormData,
-        }),
-      ]);
-
-      if (!ocrDiplomaResponse.ok || !ocrDegreeResponse.ok) {
-        throw new Error('Gagal mengekstrak OCR berstruktur bagi PDF kursus');
-      }
-
-      const ocrDiplomaData = await ocrDiplomaResponse.json();
-      const ocrDegreeData = await ocrDegreeResponse.json();
-
-      const similarityResponse = await fetch(`${apiBaseUrl}/api/similarity-embedding-structured`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          courseA: ocrDiplomaData.data,
-          courseB: ocrDegreeData.data,
-        }),
-      });
-
-      if (!similarityResponse.ok) {
-        const similarityError = await similarityResponse.json().catch(() => ({}));
-        throw new Error(similarityError.error || similarityError.details || 'Gagal menjalankan analisis AI');
-      }
-
-      const similarityData = await similarityResponse.json();
+      const courseAnalysis = await runCourseAnalysis(selectedCourseAnalysis);
+      const similarityData = courseAnalysis.analysisResult;
 
       setAnalysisArtifacts({
-        diploma: ocrDiplomaData.data,
-        degree: ocrDegreeData.data,
+        diploma: courseAnalysis.analysisArtifacts.diploma,
+        degree: courseAnalysis.analysisArtifacts.degree,
       });
       setAnalysisResult(similarityData);
+
+      // Update the course analysis with the fresh results
+      const newScore = courseAnalysis.score;
+      const newConfidence = courseAnalysis.confidence;
+      const newDecision = courseAnalysis.decision;
+
+      setSelectedCourseAnalysis(prev => ({
+        ...prev,
+        skorKesamaan: newScore,
+        confidenceScore: newConfidence,
+        decision: newDecision,
+      }));
+
+      // Update the courses list in selectedApp to reflect the new score
+      setSelectedApp(prevApp => ({
+        ...prevApp,
+        courses: prevApp.courses.map(course =>
+          course.courseNo === selectedCourseAnalysis.courseNo
+            ? {
+                ...course,
+                skorKesamaan: newScore,
+                confidenceScore: newConfidence,
+                decision: newDecision,
+              }
+            : course
+        ),
+      }));
     } catch (runError) {
       setAnalysisError(runError.message || 'Ralat semasa menjalankan analisis AI');
     } finally {
@@ -348,6 +711,51 @@ const KPDashboard = () => {
         {file.file_name}
       </a>
     );
+  };
+
+  const handleApproval = async (decision) => {
+    if (!selectedApp) {
+      return;
+    }
+
+    setApprovalLoading(true);
+    setApprovalError('');
+
+    try {
+      const newStatus = decision === 'approved' ? 'approved' : 'rejected';
+      const reportApp = {
+        ...selectedApp,
+        statusRaw: newStatus,
+        statusPermohonan: STATUS_LABELS[newStatus] || newStatus,
+      };
+
+      const { error: updateError } = await supabase
+        .from('transfer_credit_applications')
+        .update({ status: newStatus, updated_at: new Date().toISOString() })
+        .eq('id', selectedApp.idPermohonanAsal);
+
+      if (updateError) {
+        throw new Error(updateError.message);
+      }
+
+      let reportAnalysisRows = [];
+      if (includeAIInReport) {
+        reportAnalysisRows = await buildReportAnalysisRows(reportApp);
+      }
+
+      await generateOfficialReport(reportApp, newStatus, reportAnalysisRows);
+
+      // Reload applications to reflect the update
+      await loadApplications();
+
+      // Close the detail modal
+      setShowDetailModal(false);
+      setSelectedApp(null);
+    } catch (approvalErr) {
+      setApprovalError(approvalErr.message || 'Gagal mengemas kini status permohonan');
+    } finally {
+      setApprovalLoading(false);
+    }
   };
 
   return (
@@ -469,7 +877,7 @@ const KPDashboard = () => {
             Borang Permohonan Pemindahan Kredit Secara Menegak
           </Modal.Title>
         </Modal.Header>
-        <Modal.Body>
+        <Modal.Body style={{ paddingBottom: '120px' }}>
           {selectedApp && (
             <>
               <div style={{ textAlign: 'center', marginBottom: '25px', paddingBottom: '15px', borderBottom: '2px solid #667eea' }}>
@@ -698,10 +1106,58 @@ const KPDashboard = () => {
             </>
           )}
         </Modal.Body>
-        <Modal.Footer>
-          <Button variant="secondary" onClick={() => setShowDetailModal(false)}>
-            Tutup
-          </Button>
+        <Modal.Footer style={{ 
+          borderTop: '2px solid #dee2e6', 
+          padding: '15px 20px', 
+          backgroundColor: '#f8f9fa',
+          position: 'sticky',
+          bottom: 0,
+          zIndex: 1000
+        }}>
+          <div style={{ display: 'flex', gap: '15px', alignItems: 'center', justifyContent: 'space-between', width: '100%', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <input
+                type="checkbox"
+                id="includeAI"
+                checked={includeAIInReport}
+                onChange={(e) => setIncludeAIInReport(e.target.checked)}
+                style={{ cursor: 'pointer', width: '18px', height: '18px' }}
+              />
+              <label htmlFor="includeAI" style={{ margin: 0, cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}>
+                Sertakan Hasil AI dalam Laporan
+              </label>
+            </div>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <Button
+                variant="success"
+                onClick={() => handleApproval('approved')}
+                disabled={approvalLoading}
+                size="sm"
+              >
+                {approvalLoading ? 'Sedang memproses...' : '✓ Lulus'}
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => handleApproval('rejected')}
+                disabled={approvalLoading}
+                size="sm"
+              >
+                {approvalLoading ? 'Sedang memproses...' : '✕ Tolak'}
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => setShowDetailModal(false)}
+                size="sm"
+              >
+                Tutup
+              </Button>
+            </div>
+          </div>
+          {approvalError && (
+            <Alert variant="danger" className="mt-2 mb-0" style={{ width: '100%' }}>
+              {approvalError}
+            </Alert>
+          )}
         </Modal.Footer>
       </Modal>
 
