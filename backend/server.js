@@ -220,7 +220,7 @@ app.post('/api/similarity-embedding', async (req, res) => {
       details: error.message,
     });
   }
-});
+});//
 
 app.post('/api/similarity-synopsis', async (req, res) => {
   try {
