@@ -1477,6 +1477,42 @@ app.post('/api/diploma-by-code', async (req, res) => {
   }
 });
 
+app.get('/api/degree-courses', async (req, res) => {
+  try {
+    dotenv.config({ path: ENV_PATH, override: true });
+
+    if (!supabaseAdmin) {
+      return res.status(500).json({
+        error: 'Missing VITE_SUPABASE_SERVICE_ROLE_KEY in backend environment variables',
+      });
+    }
+
+    const { data, error } = await supabaseAdmin
+      .from('degree_table4')
+      .select('*')
+      .order('course_code', { ascending: true });
+
+    if (error) {
+      return res.status(400).json({
+        error: error.message,
+      });
+    }
+
+    return res.status(200).json({
+      message: 'Degree courses fetched successfully',
+      total: data.length,
+      data,
+    });
+  } catch (error) {
+    console.error('Fetch degree courses error:', error);
+
+    return res.status(500).json({
+      error: 'Failed to fetch degree courses',
+      details: error.message,
+    });
+  }
+});
+
 app.post('/api/degree-by-code', async (req, res) => {
   try {
     dotenv.config({ path: ENV_PATH, override: true });
