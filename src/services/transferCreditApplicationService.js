@@ -84,16 +84,59 @@ const uploadCourseDocument = async ({ userId, applicationId, courseNo, documentS
   };
 };
 
-const mapAnalysisResult = (analysis, course) => ({
-  similarity_score: course.skorKesamaan === null || course.skorKesamaan === undefined
-    ? 0
-    : Number(course.skorKesamaan),
-  confidence_score: analysis?.evaluation?.confidence === null || analysis?.evaluation?.confidence === undefined
+const inferDecisionFromScore = (score) => {
+  const numericScore = Number(score);
+
+  if (!Number.isFinite(numericScore)) {
+    return null;
+  }
+
+  if (numericScore >= 80) {
+    return 'Equivalent';
+  }
+
+  if (numericScore >= 60) {
+    return 'Partially Equivalent';
+  }
+
+  return 'Not Equivalent';
+};
+
+const mapAnalysisResult = (analysis, course) => {
+  const legacyScore = course.skorKesamaan === null || course.skorKesamaan === undefined
     ? null
-    : Number((Number(analysis.evaluation.confidence) * 100).toFixed(2)),
-  decision: analysis?.evaluation?.decision || null,
-  analysis_payload: analysis || null,
-});
+    : Number(course.skorKesamaan);
+
+  const payloadScore = Number(
+    analysis?.total_similarity_score
+      ?? analysis?.best_match?.total_similarity_score
+      ?? analysis?.evaluation?.final_score
+      ?? analysis?.score
+      ?? legacyScore
+      ?? 0,
+  );
+
+  const confidenceSource = analysis?.best_match?.confidence_score
+    ?? analysis?.evaluation?.confidence
+    ?? analysis?.confidence_score
+    ?? null;
+
+  const decisionSource = analysis?.best_match?.decision
+    ?? analysis?.evaluation?.decision
+    ?? analysis?.decision
+    ?? inferDecisionFromScore(payloadScore);
+
+  return {
+    similarity_score: Number.isFinite(payloadScore)
+      ? Number(payloadScore.toFixed(2))
+      : 0,
+    confidence_score: confidenceSource === null || confidenceSource === undefined
+      ? null
+      : Number(confidenceSource),
+    decision: decisionSource || null,
+    analysis_payload: analysis || null,
+  };
+};
 
 export const saveTransferCreditApplication = async ({
   user,

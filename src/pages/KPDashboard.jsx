@@ -189,7 +189,18 @@ const addSimpleTable = (doc, headers, rows, cursorY, options = {}) => {
   return cursorY + 2;
 };
 
-const getApiBaseUrl = () => import.meta.env.VITE_API_BASE_URL || 'https://ai-based-credits-transfer-system-production.up.railway.app';
+const getApiBaseUrl = () => {
+  const configuredApiBaseUrl = String(import.meta.env.VITE_API_BASE_URL || '').trim();
+  if (configuredApiBaseUrl) {
+    return configuredApiBaseUrl.replace(/\/+$/, '');
+  }
+
+  if (import.meta.env.DEV) {
+    return 'http://localhost:3000';
+  }
+
+  return 'https://ai-based-credits-transfer-system-production.up.railway.app';
+};
 
 const KPDashboard = () => {
   const { user } = useAuth();
@@ -201,7 +212,6 @@ const KPDashboard = () => {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
   const [analysisResult, setAnalysisResult] = useState(null);
-  const [analysisArtifacts, setAnalysisArtifacts] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [approvalLoading, setApprovalLoading] = useState(false);
@@ -388,8 +398,73 @@ const KPDashboard = () => {
     };
   }, [applications]);
 
+  const selectedAnalysisGroupRows = useMemo(() => {
+    if (!selectedApp || !selectedCourseAnalysis) {
+      return [];
+    }
+
+    const selectedDegreeCode = String(selectedCourseAnalysis.degree?.course_code || '').trim();
+
+    return (selectedApp.courses || []).filter(
+      (course) => String(course.degree?.course_code || '').trim() === selectedDegreeCode,
+    );
+  }, [selectedApp, selectedCourseAnalysis]);
+
+  const renderCommaList = (values) => {
+    const items = Array.isArray(values)
+      ? values.map((value) => String(value || '').trim()).filter(Boolean)
+      : [];
+
+    return items.length > 0 ? items.join(', ') : '-';
+  };
+
   const getStatusBadge = (status) => {
     return <Badge bg={STATUS_BADGES[status] || 'info'}>{status}</Badge>;
+  };
+
+  const buildDegreeGroups = (courses = []) => {
+    const groupMap = new Map();
+
+    courses.forEach((course) => {
+      const degreeCode = String(course.degree?.course_code || '').trim();
+      const degreeName = String(course.degree?.course_name || '').trim();
+      const groupKey = degreeCode || degreeName || `course-${course.courseNo}`;
+
+      if (!groupMap.has(groupKey)) {
+        groupMap.set(groupKey, {
+          key: groupKey,
+          degreeCode,
+          degreeName,
+          degree: course.degree || null,
+          degreePdf: course.degreePdf || null,
+          rows: [],
+        });
+      }
+
+      groupMap.get(groupKey).rows.push(course);
+    });
+
+    return Array.from(groupMap.values()).map((group) => ({
+      ...group,
+      rows: [...group.rows].sort((a, b) => a.courseNo - b.courseNo),
+    }));
+  };
+
+  const getUniqueDegreeCreditTotal = (courses = []) => {
+    const seenDegreeKeys = new Set();
+
+    return courses.reduce((sum, course) => {
+      const degreeCode = String(course?.degree?.course_code || '').trim();
+      const degreeName = String(course?.degree?.course_name || '').trim();
+      const degreeKey = degreeCode || degreeName;
+
+      if (!degreeKey || seenDegreeKeys.has(degreeKey)) {
+        return sum;
+      }
+
+      seenDegreeKeys.add(degreeKey);
+      return sum + Number(course?.degree?.credit || 0);
+    }, 0);
   };
 
   const handleViewDetail = (app) => {
@@ -397,68 +472,58 @@ const KPDashboard = () => {
     setShowDetailModal(true);
   };
 
-  const handleViewAnalysis = (app, course) => {
+  const handleViewAnalysis = (app, course, diplomaCodesForDegree = []) => {
+    const degreeCode = String(course?.degree?.course_code || '').trim();
     setSelectedApp(app);
-    setSelectedCourseAnalysis(course);
+    setSelectedCourseAnalysis({
+      ...course,
+      degreeCode,
+      diplomaCodesForDegree,
+    });
     setAnalysisError('');
     setAnalysisResult(null);
-    setAnalysisArtifacts(null);
     setShowAnalysisModal(true);
   };
 
-  const fetchPdfAsFile = async (fileUrl, fileName) => {
-    const response = await fetch(fileUrl);
-    if (!response.ok) {
-      throw new Error(`Gagal memuat turun fail PDF: ${fileName}`);
-    }
+  const runCourseAnalysis = async (course, diplomaCodes = null, degreeCodeOverride = '', applicationIdOverride = '') => {
+    const courseCodeDegree = String(degreeCodeOverride || course?.degreeCode || course?.degree?.course_code || '').trim();
+    const courseCodeDiplomaList = Array.isArray(diplomaCodes) && diplomaCodes.length > 0
+      ? diplomaCodes.map((code) => String(code || '').trim()).filter(Boolean)
+      : String(course?.diploma?.course_code || '').trim()
+        ? [String(course?.diploma?.course_code || '').trim()]
+        : [];
 
-    const blob = await response.blob();
-    return new File([blob], fileName || 'document.pdf', { type: blob.type || 'application/pdf' });
-  };
-
-  const runCourseAnalysis = async (course) => {
-    if (!course?.diplomaPdf || !course?.degreePdf) {
+    if (!courseCodeDegree || courseCodeDiplomaList.length === 0) {
       return null;
     }
 
     const apiBaseUrl = getApiBaseUrl();
-    const diplomaFile = await fetchPdfAsFile(course.diplomaPdf.file_url, course.diplomaPdf.file_name);
-    const degreeFile = await fetchPdfAsFile(course.degreePdf.file_url, course.degreePdf.file_name);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
 
-    const diplomaFormData = new FormData();
-    diplomaFormData.append('file', diplomaFile);
-
-    const degreeFormData = new FormData();
-    degreeFormData.append('file', degreeFile);
-
-    const [ocrDiplomaResponse, ocrDegreeResponse] = await Promise.all([
-      fetch(`${apiBaseUrl}/api/pdf-ocr-structured`, {
+    let similarityResponse;
+    try {
+      similarityResponse = await fetch(`${apiBaseUrl}/api/course-analysis-by-codes`, {
         method: 'POST',
-        body: diplomaFormData,
-      }),
-      fetch(`${apiBaseUrl}/api/pdf-ocr-structured`, {
-        method: 'POST',
-        body: degreeFormData,
-      }),
-    ]);
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          course_code_diploma: courseCodeDiplomaList,
+          course_code_degree: courseCodeDegree,
+          application_id: String(applicationIdOverride || '').trim() || undefined,
+        }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new Error('Analisis AI mengambil masa terlalu lama. Sila cuba semula.');
+      }
 
-    if (!ocrDiplomaResponse.ok || !ocrDegreeResponse.ok) {
-      throw new Error('Gagal mengekstrak OCR berstruktur bagi PDF kursus');
+      throw new Error('Gagal menghubungi servis analisis AI. Sila semak backend dan cuba semula.');
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    const ocrDiplomaData = await ocrDiplomaResponse.json();
-    const ocrDegreeData = await ocrDegreeResponse.json();
-
-    const similarityResponse = await fetch(`${apiBaseUrl}/api/similarity-embedding-structured`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        courseA: ocrDiplomaData.data,
-        courseB: ocrDegreeData.data,
-      }),
-    });
 
     if (!similarityResponse.ok) {
       const similarityError = await similarityResponse.json().catch(() => ({}));
@@ -466,20 +531,17 @@ const KPDashboard = () => {
     }
 
     const similarityData = await similarityResponse.json();
-    const score = (similarityData.evaluation?.final_score || 0) * 100;
-    const confidence = (similarityData.evaluation?.confidence || 0) * 100;
-    const decision = similarityData.evaluation?.decision || '-';
+    const analysisData = similarityData?.data || {};
+    const score = Number(analysisData.total_similarity_score || 0);
+    const confidence = Number(analysisData.synopsis_similarity_percentage || 0);
+    const decision = score >= 80 ? 'Equivalent' : 'Not Equivalent';
 
     return {
       courseNo: course.courseNo,
       score,
       confidence,
       decision,
-      analysisResult: similarityData,
-      analysisArtifacts: {
-        diploma: ocrDiplomaData.data,
-        degree: ocrDegreeData.data,
-      },
+      analysisResult: analysisData,
     };
   };
 
@@ -487,7 +549,12 @@ const KPDashboard = () => {
     const rows = [];
 
     for (const course of app.courses || []) {
-      const analysisRow = await runCourseAnalysis(course);
+      const analysisRow = await runCourseAnalysis(
+        course,
+        course.diploma?.course_code ? [course.diploma.course_code] : [],
+        course.degree?.course_code || '',
+        app?.idPermohonanAsal || '',
+      );
       if (analysisRow) {
         rows.push(analysisRow);
       }
@@ -610,24 +677,13 @@ const KPDashboard = () => {
           ['Skor Kesamaan', formatScore(row.score)],
           ['Keyakinan AI', `${Number(row.confidence || 0).toFixed(2)}%`],
           ['Keputusan', row.decision || '-'],
-          ['Kod Diploma', row.analysisArtifacts?.diploma?.course_code || '-'],
-          ['Nama Diploma', row.analysisArtifacts?.diploma?.course_name || '-'],
-          ['Kod Degree', row.analysisArtifacts?.degree?.course_code || '-'],
-          ['Nama Degree', row.analysisArtifacts?.degree?.course_name || '-'],
-          ['Kredit Diploma', row.analysisArtifacts?.diploma?.credits ?? '-'],
-          ['Kredit Degree', row.analysisArtifacts?.degree?.credits ?? '-'],
         ], cursorY + 1);
 
-        const synopsisText = row.analysisArtifacts?.diploma?.synopsis || '-';
-        const degreeSynopsisText = row.analysisArtifacts?.degree?.synopsis || '-';
+        const matchSummary = row.analysisResult?.match_summary || {};
         cursorY = addKeyValueRows(doc, [
-          ['Synopsis Diploma', synopsisText],
-          ['Synopsis Degree', degreeSynopsisText],
-        ], cursorY + 1);
-
-        const fieldsAvailable = row.analysisResult?.fields_available || [];
-        cursorY = addKeyValueRows(doc, [
-          ['Bidang Dibandingkan', fieldsAvailable.length > 0 ? fieldsAvailable.join(', ') : '-'],
+          ['Padanan Topik', `${Number(matchSummary.matched_topics || 0)} topik`],
+          ['Topik Degree Belum Padan', (matchSummary.unmatched_degree_topics || []).join(', ') || '-'],
+          ['Topik Diploma Belum Padan', (matchSummary.unmatched_diploma_topics || []).join(', ') || '-'],
         ], cursorY + 1);
 
         cursorY = ensurePdfSpace(doc, cursorY, 18);
@@ -648,24 +704,30 @@ const KPDashboard = () => {
   };
 
   const handleRunAnalysis = async () => {
-    if (!selectedCourseAnalysis?.diplomaPdf || !selectedCourseAnalysis?.degreePdf) {
-      setAnalysisError('PDF diploma dan PDF degree mesti wujud sebelum analisis boleh dijalankan.');
+    const degreeCode = String(selectedCourseAnalysis?.degreeCode || selectedCourseAnalysis?.degree?.course_code || '').trim();
+    const diplomaCodes = Array.isArray(selectedCourseAnalysis?.diplomaCodesForDegree)
+      ? selectedCourseAnalysis.diplomaCodesForDegree.map((code) => String(code || '').trim()).filter(Boolean)
+      : String(selectedCourseAnalysis?.diploma?.course_code || '').trim()
+        ? [String(selectedCourseAnalysis?.diploma?.course_code || '').trim()]
+        : [];
+
+    if (!degreeCode || diplomaCodes.length === 0) {
+      setAnalysisError('Kod kursus diploma dan degree mesti wujud sebelum analisis boleh dijalankan.');
       return;
     }
 
     setAnalysisLoading(true);
     setAnalysisError('');
     setAnalysisResult(null);
-    setAnalysisArtifacts(null);
 
     try {
-      const courseAnalysis = await runCourseAnalysis(selectedCourseAnalysis);
+      const courseAnalysis = await runCourseAnalysis(
+        selectedCourseAnalysis,
+        diplomaCodes,
+        degreeCode,
+        selectedApp?.idPermohonanAsal || '',
+      );
       const similarityData = courseAnalysis.analysisResult;
-
-      setAnalysisArtifacts({
-        diploma: courseAnalysis.analysisArtifacts.diploma,
-        degree: courseAnalysis.analysisArtifacts.degree,
-      });
       setAnalysisResult(similarityData);
 
       // Update the course analysis with the fresh results
@@ -684,7 +746,7 @@ const KPDashboard = () => {
       setSelectedApp(prevApp => ({
         ...prevApp,
         courses: prevApp.courses.map(course =>
-          course.courseNo === selectedCourseAnalysis.courseNo
+          String(course.degree?.course_code || '') === String(selectedCourseAnalysis.degree?.course_code || '')
             ? {
                 ...course,
                 skorKesamaan: newScore,
@@ -991,34 +1053,54 @@ const KPDashboard = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {selectedApp.courses.map((course, idx) => (
-                        <tr key={`${selectedApp.idPermohonanAsal}-${course.courseNo}`}>
-                          <td style={{ textAlign: 'center' }}>{course.courseNo}</td>
-                          <td style={{ fontWeight: 'bold' }}>{course.diploma?.course_code || '-'}</td>
-                          <td>{course.diploma?.course_name || '-'}</td>
-                          <td>{renderFileLink(course.diplomaPdf)}</td>
-                          <td>{course.diploma?.grade || '-'}</td>
-                          <td style={{ textAlign: 'center' }}>{course.diploma?.credit ?? '-'}</td>
-                          <td style={{ fontWeight: 'bold' }}>{course.degree?.course_code || '-'}</td>
-                          <td>{course.degree?.course_name || '-'}</td>
-                          <td>{renderFileLink(course.degreePdf)}</td>
-                          <td style={{ textAlign: 'center' }}>{course.degree?.credit ?? '-'}</td>
-                          <td style={{ textAlign: 'center' }}>
-                            <Badge bg={(course.skorKesamaan || 0) >= 80 ? 'success' : 'warning'} style={{ fontSize: '12px' }}>
-                              {formatScore(course.skorKesamaan)}
-                            </Badge>
-                          </td>
-                          <td style={{ textAlign: 'center' }}>
-                            <Button
-                              variant="outline-primary"
-                              size="sm"
-                              onClick={() => handleViewAnalysis(selectedApp, course)}
-                            >
-                              Lihat Analisis
-                            </Button>
-                          </td>
-                        </tr>
-                      ))}
+                      {buildDegreeGroups(selectedApp.courses).flatMap((group) => {
+                        const diplomaCodesForDegree = group.rows
+                          .map((row) => row.diploma?.course_code)
+                          .filter(Boolean);
+                        const degreeScore = group.rows.find((row) => row.skorKesamaan !== null && row.skorKesamaan !== undefined)?.skorKesamaan ?? null;
+
+                        return group.rows.map((course, rowIndex) => (
+                          <tr key={`${selectedApp.idPermohonanAsal}-${group.key}-${course.courseNo}`}>
+                            <td style={{ textAlign: 'center' }}>{course.courseNo}</td>
+                            <td style={{ fontWeight: 'bold' }}>{course.diploma?.course_code || '-'}</td>
+                            <td>{course.diploma?.course_name || '-'}</td>
+                            <td>{renderFileLink(course.diplomaPdf)}</td>
+                            <td>{course.diploma?.grade || '-'}</td>
+                            <td style={{ textAlign: 'center' }}>{course.diploma?.credit ?? '-'}</td>
+
+                            {rowIndex === 0 && (
+                              <>
+                                <td rowSpan={group.rows.length} style={{ fontWeight: 'bold', verticalAlign: 'middle' }}>
+                                  {group.degree?.course_code || '-'}
+                                </td>
+                                <td rowSpan={group.rows.length} style={{ verticalAlign: 'middle' }}>
+                                  {group.degree?.course_name || '-'}
+                                </td>
+                                <td rowSpan={group.rows.length} style={{ verticalAlign: 'middle' }}>
+                                  {renderFileLink(group.degreePdf)}
+                                </td>
+                                <td rowSpan={group.rows.length} style={{ textAlign: 'center', verticalAlign: 'middle' }}>
+                                  {group.degree?.credit ?? '-'}
+                                </td>
+                                <td rowSpan={group.rows.length} style={{ textAlign: 'center', verticalAlign: 'middle' }}>
+                                  <Badge bg={(degreeScore || 0) >= 80 ? 'success' : 'warning'} style={{ fontSize: '12px' }}>
+                                    {formatScore(degreeScore)}
+                                  </Badge>
+                                </td>
+                                <td rowSpan={group.rows.length} style={{ textAlign: 'center', verticalAlign: 'middle' }}>
+                                  <Button
+                                    variant="outline-primary"
+                                    size="sm"
+                                    onClick={() => handleViewAnalysis(selectedApp, course, diplomaCodesForDegree)}
+                                  >
+                                    Lihat Analisis
+                                  </Button>
+                                </td>
+                              </>
+                            )}
+                          </tr>
+                        ));
+                      })}
                     </tbody>
                   </Table>
                 </div>
@@ -1039,7 +1121,7 @@ const KPDashboard = () => {
                     </label>
                     <p style={{ margin: 0 }}>
                       <Badge bg="success" style={{ fontSize: '14px', padding: '6px 10px' }}>
-                        {selectedApp.courses.reduce((sum, c) => sum + Number(c.degree?.credit || 0), 0)} Kredit
+                        {getUniqueDegreeCreditTotal(selectedApp.courses)} Kredit
                       </Badge>
                     </p>
                   </div>
@@ -1171,21 +1253,22 @@ const KPDashboard = () => {
         <Modal.Body>
           {selectedApp && selectedCourseAnalysis && (
             <>
-              <div className="mb-3 p-3 rounded" style={{ background: '#f8fafc' }}>
-                <h6 className="fw-bold mb-2">Pasangan Kursus</h6>
-                <div className="mb-2">
-                  <strong>Kursus Diploma:</strong> {selectedCourseAnalysis.diploma?.course_code || '-'} - {selectedCourseAnalysis.diploma?.course_name || '-'}
-                </div>
-                <div>
-                  <strong>Kursus Degree:</strong> {selectedCourseAnalysis.degree?.course_code || '-'} - {selectedCourseAnalysis.degree?.course_name || '-'}
-                </div>
-              </div>
-
               <div className="mb-3">
                 <h6 className="fw-bold mb-2">Pautan PDF</h6>
                 <div className="d-flex flex-column gap-2">
                   <div>
-                    <strong>PDF Diploma:</strong> {renderFileLink(selectedCourseAnalysis.diplomaPdf)}
+                    <strong>PDF Diploma (Semua Padanan Degree Ini):</strong>
+                    {selectedAnalysisGroupRows.length > 0 ? (
+                      <ul className="mb-0 mt-1 ps-3">
+                        {selectedAnalysisGroupRows.map((course) => (
+                          <li key={`diploma-link-${course.courseNo}`}>
+                            {course.diploma?.course_code || '-'}: {renderFileLink(course.diplomaPdf)}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <span> {renderFileLink(selectedCourseAnalysis.diplomaPdf)}</span>
+                    )}
                   </div>
                   <div>
                     <strong>PDF Degree:</strong> {renderFileLink(selectedCourseAnalysis.degreePdf)}
@@ -1204,23 +1287,37 @@ const KPDashboard = () => {
                 )}
               </div>
 
-              {analysisResult && analysisArtifacts && (
+              {analysisResult && (
                 <>
                   <div className="mb-3">
                     <h6 className="fw-bold mb-2">Ringkasan Analisis</h6>
                     <Table bordered hover responsive size="sm" className="align-middle mb-0">
                       <tbody>
                         <tr>
-                          <th style={{ width: '25%' }}>Skor Kesamaan</th>
-                          <td>{Number((analysisResult.evaluation?.final_score || 0) * 100).toFixed(2)}%</td>
-                          <th style={{ width: '25%' }}>Keyakinan AI</th>
-                          <td>{Number((analysisResult.evaluation?.confidence || 0) * 100).toFixed(2)}%</td>
+                          <th style={{ width: '25%' }}>Kod Kursus Degree</th>
+                          <td>{analysisResult.course_code_degree || '-'}</td>
+                          <th style={{ width: '25%' }}>Nama Kursus Degree</th>
+                          <td>{selectedCourseAnalysis.degree?.course_name || '-'}</td>
+                        </tr>
+                        <tr>
+                          <th>Kod Kursus Diploma</th>
+                          <td>{renderCommaList(analysisResult.course_code_diploma)}</td>
+                          <th>Nama Kursus Diploma</th>
+                          <td>{renderCommaList(selectedAnalysisGroupRows.map((course) => course.diploma?.course_name))}</td>
+                        </tr>
+                        <tr>
+                          <th>Topik Degree Padan</th>
+                          <td>{analysisResult.match_summary?.matched_topics ?? '-'}</td>
+                          <th>Skor Kesamaan</th>
+                          <td>{formatScore(analysisResult.total_similarity_score)}</td>
                         </tr>
                         <tr>
                           <th>Keputusan</th>
                           <td colSpan="3">
-                            <Badge bg={analysisResult.evaluation?.decision === 'Equivalent' ? 'success' : 'warning'}>
-                              {analysisResult.evaluation?.decision || '-'}
+                            <Badge bg={analysisResult.total_similarity_score >= 80 ? 'success' : 'warning'}>
+                              {analysisResult.total_similarity_score >= 80
+                                ? 'Equivalent'
+                                : 'Not Equivalent'}
                             </Badge>
                           </td>
                         </tr>
@@ -1229,149 +1326,53 @@ const KPDashboard = () => {
                   </div>
 
                   <div className="mb-3">
-                    <h6 className="fw-bold mb-2">Bidang Dibandingkan</h6>
+                    <h6 className="fw-bold mb-2">Jadual Topik</h6>
                     <Table bordered hover responsive size="sm" className="align-middle mb-0">
                       <thead className="table-light">
                         <tr>
-                          <th style={{ width: '70%' }}>Bidang</th>
-                          <th style={{ width: '30%' }}>Berat</th>
+                          <th style={{ width: '25%' }}>Topik Degree Belum Dipadankan</th>
+                          <th style={{ width: '25%' }}>Topik Diploma Belum Dipadankan</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {(analysisResult.fields_available || []).length > 0 ? (
-                          analysisResult.fields_available.map((field) => (
-                            <tr key={field}>
-                              <td>{field}</td>
-                              <td>{analysisResult.redistributed_weights?.[field] ?? '-'}%</td>
-                            </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td colSpan="2" className="text-center text-muted">
-                              Tiada bidang ditemui.
-                            </td>
-                          </tr>
-                        )}
+                        <tr>
+                          <td>{renderCommaList(analysisResult.match_summary?.unmatched_degree_topics)}</td>
+                          <td>{renderCommaList(analysisResult.match_summary?.unmatched_diploma_topics)}</td>
+                        </tr>
                       </tbody>
                     </Table>
                   </div>
 
                   <div className="mb-3">
-                    <h6 className="fw-bold mb-2">Skor Setiap Bidang</h6>
+                    <h6 className="fw-bold mb-2">Padanan Topik Terperinci</h6>
                     <Table bordered hover responsive size="sm" className="align-middle mb-0">
                       <thead className="table-light">
                         <tr>
-                          <th>Bidang</th>
+                          <th>Kod Diploma</th>
+                          <th>Topik Diploma</th>
+                          <th>Topik Degree</th>
                           <th>Skor</th>
+                          <th>Status</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {analysisResult.evaluation?.scores && Object.keys(analysisResult.evaluation.scores).length > 0 ? (
-                          Object.entries(analysisResult.evaluation.scores).map(([field, score]) => (
-                            <tr key={field}>
-                              <td>{field}</td>
-                              <td>{score === null || score === undefined ? '-' : score}</td>
+                        {(analysisResult.topic_matches_table || []).length > 0 ? (
+                          analysisResult.topic_matches_table.map((topicRow, index) => (
+                            <tr key={`${topicRow.diploma_topic || 'topic'}-${index}`}>
+                              <td>{topicRow.diploma_source_course || '-'}</td>
+                              <td>{topicRow.diploma_topic || '-'}</td>
+                              <td>{topicRow.degree_topic || '-'}</td>
+                              <td>{formatScore(topicRow.similarity)}</td>
+                              <td>{topicRow.status || '-'}</td>
                             </tr>
                           ))
                         ) : (
                           <tr>
-                            <td colSpan="2" className="text-center text-muted">
+                            <td colSpan="5" className="text-center text-muted">
                               Tiada skor tersedia.
                             </td>
                           </tr>
                         )}
-                      </tbody>
-                    </Table>
-                  </div>
-
-                  <div className="mb-3">
-                    <h6 className="fw-bold mb-2">OCR Kursus Diploma</h6>
-                    <Table bordered hover responsive size="sm" className="align-middle mb-0">
-                      <tbody>
-                        <tr>
-                          <th style={{ width: '22%' }}>Kod</th>
-                          <td>{analysisArtifacts.diploma.course_code || '-'}</td>
-                          <th style={{ width: '22%' }}>Nama</th>
-                          <td>{analysisArtifacts.diploma.course_name || '-'}</td>
-                        </tr>
-                        <tr>
-                          <th>Kredit</th>
-                          <td>{analysisArtifacts.diploma.credits ?? '-'}</td>
-                          <th>Bahasa</th>
-                          <td>{analysisArtifacts.diploma.language_detected || '-'}</td>
-                        </tr>
-                        <tr>
-                          <th>Synopsis</th>
-                          <td colSpan="3">{analysisArtifacts.diploma.synopsis || '-'}</td>
-                        </tr>
-                        <tr>
-                          <th>Learning Outcomes</th>
-                          <td colSpan="3">
-                            {(analysisArtifacts.diploma.learning_outcomes || []).length > 0 ? (
-                              <ul className="mb-0 ps-3">
-                                {analysisArtifacts.diploma.learning_outcomes.map((item, index) => (
-                                  <li key={index}>{item}</li>
-                                ))}
-                              </ul>
-                            ) : (
-                              '-'
-                            )}
-                          </td>
-                        </tr>
-                        <tr>
-                          <th>Topics</th>
-                          <td colSpan="3">{(analysisArtifacts.diploma.topics || []).join(' | ') || '-'}</td>
-                        </tr>
-                        <tr>
-                          <th>Assessments</th>
-                          <td colSpan="3">{(analysisArtifacts.diploma.assessments || []).join(' | ') || '-'}</td>
-                        </tr>
-                      </tbody>
-                    </Table>
-                  </div>
-
-                  <div className="mb-3">
-                    <h6 className="fw-bold mb-2">OCR Kursus Degree</h6>
-                    <Table bordered hover responsive size="sm" className="align-middle mb-0">
-                      <tbody>
-                        <tr>
-                          <th style={{ width: '22%' }}>Kod</th>
-                          <td>{analysisArtifacts.degree.course_code || '-'}</td>
-                          <th style={{ width: '22%' }}>Nama</th>
-                          <td>{analysisArtifacts.degree.course_name || '-'}</td>
-                        </tr>
-                        <tr>
-                          <th>Kredit</th>
-                          <td>{analysisArtifacts.degree.credits ?? '-'}</td>
-                          <th>Bahasa</th>
-                          <td>{analysisArtifacts.degree.language_detected || '-'}</td>
-                        </tr>
-                        <tr>
-                          <th>Synopsis</th>
-                          <td colSpan="3">{analysisArtifacts.degree.synopsis || '-'}</td>
-                        </tr>
-                        <tr>
-                          <th>Learning Outcomes</th>
-                          <td colSpan="3">
-                            {(analysisArtifacts.degree.learning_outcomes || []).length > 0 ? (
-                              <ul className="mb-0 ps-3">
-                                {analysisArtifacts.degree.learning_outcomes.map((item, index) => (
-                                  <li key={index}>{item}</li>
-                                ))}
-                              </ul>
-                            ) : (
-                              '-'
-                            )}
-                          </td>
-                        </tr>
-                        <tr>
-                          <th>Topics</th>
-                          <td colSpan="3">{(analysisArtifacts.degree.topics || []).join(' | ') || '-'}</td>
-                        </tr>
-                        <tr>
-                          <th>Assessments</th>
-                          <td colSpan="3">{(analysisArtifacts.degree.assessments || []).join(' | ') || '-'}</td>
-                        </tr>
                       </tbody>
                     </Table>
                   </div>
@@ -1383,22 +1384,28 @@ const KPDashboard = () => {
                   <Table bordered hover responsive size="sm" className="align-middle mb-0">
                     <tbody>
                       <tr>
-                        <th style={{ width: '25%' }}>Kursus Diploma</th>
-                        <td>{selectedCourseAnalysis.diploma?.course_code || '-'} - {selectedCourseAnalysis.diploma?.course_name || '-'}</td>
-                        <th style={{ width: '25%' }}>Kursus Degree</th>
-                        <td>{selectedCourseAnalysis.degree?.course_code || '-'} - {selectedCourseAnalysis.degree?.course_name || '-'}</td>
+                        <th style={{ width: '30%' }}>Kod Kursus Diploma</th>
+                        <td>{selectedCourseAnalysis.diploma?.course_code || '-'}</td>
+                      </tr>
+                      <tr>
+                        <th>Nama Kursus Diploma</th>
+                        <td>{selectedCourseAnalysis.diploma?.course_name || '-'}</td>
+                      </tr>
+                      <tr>
+                        <th>Kod Kursus Degree</th>
+                        <td>{selectedCourseAnalysis.degreeCode || selectedCourseAnalysis.degree?.course_code || '-'}</td>
+                      </tr>
+                      <tr>
+                        <th>Nama Kursus Degree</th>
+                        <td>{selectedCourseAnalysis.degree?.course_name || '-'}</td>
                       </tr>
                       <tr>
                         <th>Skor Kesamaan</th>
                         <td>{formatScore(selectedCourseAnalysis.skorKesamaan)}</td>
-                        <th>Keyakinan AI</th>
-                        <td>{selectedCourseAnalysis.confidenceScore !== null && selectedCourseAnalysis.confidenceScore !== undefined
-                          ? `${Number(selectedCourseAnalysis.confidenceScore).toFixed(2)}%`
-                          : '-'}</td>
                       </tr>
                       <tr>
                         <th>Keputusan</th>
-                        <td colSpan="3">
+                        <td>
                           <Badge bg={selectedCourseAnalysis.decision === 'Equivalent' ? 'success' : 'warning'}>
                             {selectedCourseAnalysis.decision || '-'}
                           </Badge>

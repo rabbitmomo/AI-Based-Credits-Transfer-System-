@@ -19,6 +19,28 @@ const StudentDashboard = () => {
   const [selectedApplication, setSelectedApplication] = useState(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
 
+  const formatMalaysiaDateTime = (value) => {
+    if (!value) {
+      return '-';
+    }
+
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '-';
+    }
+
+    return date.toLocaleString('ms-MY', {
+      timeZone: 'Asia/Kuala_Lumpur',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+  };
+
   const loadApplications = useCallback(async () => {
     if (!user?.id) {
       setApplications([]);
@@ -126,7 +148,8 @@ const StudentDashboard = () => {
         analysisMap.get(analysis.application_id).push(analysis);
       }
 
-      const formattedApplications = (appRows || []).map((app, index) => {
+        const totalAppCount = (appRows || []).length;
+        const formattedApplications = (appRows || []).map((app, index) => {
         const diplomaCourses = [...(diplomaMap.get(app.id) || [])].sort((a, b) => a.course_no - b.course_no);
         const degreeCourses = [...(degreeMap.get(app.id) || [])].sort((a, b) => a.course_no - b.course_no);
         const supportDocuments = supportDocsMap.get(app.id) || [];
@@ -139,7 +162,7 @@ const StudentDashboard = () => {
         ])].sort((a, b) => a - b);
 
         return {
-          idPermohonan: `REQ${String(index + 1).padStart(3, '0')}`,
+          idPermohonan: `REQ${String(totalAppCount - index).padStart(3, '0')}`,
           idPermohonanAsal: app.id,
           courses: courseNos.map((courseNo, courseIndex) => {
             const diploma = diplomaCourses.find((course) => course.course_no === courseNo) || null;
@@ -208,6 +231,59 @@ const StudentDashboard = () => {
     return applications.length > 0 ? '' : 'Tiada permohonan ditemui. Hantar borang pemindahan kredit untuk melihat rekod di sini.';
   }, [loading, error, applications.length]);
 
+  const groupedCoursePairs = useMemo(() => {
+    if (!selectedApplication?.courses?.length) {
+      return [];
+    }
+
+    const groupMap = new Map();
+
+    selectedApplication.courses.forEach((course) => {
+      const degreeCode = String(course.kodSasaran || '').trim();
+      const degreeName = String(course.namaSasaran || '').trim();
+      const groupKey = degreeCode || degreeName || `group-${course.kodDiploma || Math.random()}`;
+
+      if (!groupMap.has(groupKey)) {
+        groupMap.set(groupKey, {
+          key: groupKey,
+          degreeCode,
+          degreeName,
+          degreeCredit: course.kreditSetara || 0,
+          rows: [],
+        });
+      }
+
+      groupMap.get(groupKey).rows.push(course);
+    });
+
+    return Array.from(groupMap.values()).map((group) => ({
+      ...group,
+      rows: [...group.rows],
+    }));
+  }, [selectedApplication]);
+
+  const getRequestedDegreeCourseCount = (courses = []) => {
+    const seenDegreeKeys = new Set();
+
+    return courses.reduce((count, course) => {
+      const degreeCode = String(course?.kodSasaran || '').trim();
+      const degreeName = String(course?.namaSasaran || '').trim();
+      const degreeKey = degreeCode || degreeName;
+
+      if (!degreeKey || seenDegreeKeys.has(degreeKey)) {
+        return count;
+      }
+
+      seenDegreeKeys.add(degreeKey);
+      return count + 1;
+    }, 0);
+  };
+
+  const totalKreditSetaraUnique = useMemo(
+    () => groupedCoursePairs.reduce((sum, group) => sum + Number(group.degreeCredit || 0), 0),
+    [groupedCoursePairs],
+  );
+
   const getStatusBadge = (status) => {
     const variants = {
       'Menunggu Analisis': 'warning',
@@ -230,7 +306,7 @@ const StudentDashboard = () => {
   };
 
   return (
-    <Container className="py-4 py-md-5">
+    <Container className="py-4 py-md-5" style={{ marginTop: '25rem' }}>
       <Row className="mb-4">
         <Col>
           <h1>Papan Pemuka Pelajar</h1>
@@ -335,10 +411,10 @@ const StudentDashboard = () => {
                         <tr key={app.idPermohonanAsal}>
                           <td className="fw-bold">{app.idPermohonan}</td>
                           <td>
-                            <Badge bg="info">{app.courses.length} Kursus</Badge>
+                            <Badge bg="info">{getRequestedDegreeCourseCount(app.courses)} Kursus Degree</Badge>
                           </td>
                           <td>{getStatusBadge(app.statusPermohonan)}</td>
-                          <td>{app.tarikhHantar}</td>
+                          <td>{formatMalaysiaDateTime(app.tarikhHantar)}</td>
                           <td>
                             <Button 
                               variant="outline-primary" 
@@ -388,14 +464,14 @@ const StudentDashboard = () => {
                     <p className="mb-2">
                       <strong>Tarikh Hantar:</strong>
                       <br />
-                      {selectedApplication.tarikhHantar}
+                      {formatMalaysiaDateTime(selectedApplication.tarikhHantar)}
                     </p>
                   </Col>
                   <Col md={6}>
                     <p className="mb-0">
                       <strong>Bilangan Kursus:</strong>
                       <br />
-                      {selectedApplication.courses.length} kursus
+                      {getRequestedDegreeCourseCount(selectedApplication.courses)} kursus degree
                     </p>
                   </Col>
                 </Row>
@@ -416,32 +492,46 @@ const StudentDashboard = () => {
                       </tr>
                     </thead>
                     <tbody>
-                      {selectedApplication.courses.map((course, idx) => (
-                        <tr key={idx}>
-                          <td className="text-center fw-bold">{idx + 1}</td>
-                          <td>
-                            <div>
-                              <strong>{course.kodDiploma}</strong>
-                              <br />
-                              <small className="text-muted">{course.namaDiploma}</small>
-                            </div>
-                          </td>
-                          <td className="text-center">{course.gred || '-'}</td>
-                          <td className="text-center">
-                            <Badge bg="info">{course.kreditDiploma || 0}</Badge>
-                          </td>
-                          <td>
-                            <div>
-                              <strong>{course.kodSasaran}</strong>
-                              <br />
-                              <small className="text-muted">{course.namaSasaran}</small>
-                            </div>
-                          </td>
-                          <td className="text-center">
-                            <Badge bg="success">{course.kreditSetara || 0}</Badge>
+                      {groupedCoursePairs.length > 0 ? (
+                        groupedCoursePairs.flatMap((group) =>
+                          group.rows.map((course, rowIndex) => (
+                            <tr key={`${group.key}-${course.kodDiploma || rowIndex}`}>
+                              <td className="text-center fw-bold">{rowIndex + 1}</td>
+                              <td>
+                                <div>
+                                  <strong>{course.kodDiploma}</strong>
+                                  <br />
+                                  <small className="text-muted">{course.namaDiploma}</small>
+                                </div>
+                              </td>
+                              <td className="text-center">{course.gred || '-'}</td>
+                              <td className="text-center">
+                                <Badge bg="info">{course.kreditDiploma || 0}</Badge>
+                              </td>
+                              {rowIndex === 0 && (
+                                <>
+                                  <td rowSpan={group.rows.length} className="align-middle">
+                                    <div>
+                                      <strong>{group.degreeCode || '-'}</strong>
+                                      <br />
+                                      <small className="text-muted">{group.degreeName || '-'}</small>
+                                    </div>
+                                  </td>
+                                  <td rowSpan={group.rows.length} className="text-center align-middle">
+                                    <Badge bg="success">{group.degreeCredit || 0}</Badge>
+                                  </td>
+                                </>
+                              )}
+                            </tr>
+                          )),
+                        )
+                      ) : (
+                        <tr>
+                          <td colSpan="6" className="text-center text-muted">
+                            Tiada data kursus ditemui.
                           </td>
                         </tr>
-                      ))}
+                      )}
                     </tbody>
                   </Table>
                 </div>
@@ -461,7 +551,7 @@ const StudentDashboard = () => {
                         <strong>Total Kredit Setara:</strong>
                         <br />
                         <Badge bg="success">
-                          {selectedApplication.courses.reduce((sum, c) => sum + (c.kreditSetara || 0), 0)} Kredit
+                          {totalKreditSetaraUnique} Kredit
                         </Badge>
                       </p>
                     </Col>

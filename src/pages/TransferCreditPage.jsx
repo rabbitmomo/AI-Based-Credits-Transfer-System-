@@ -8,6 +8,7 @@ const TransferCreditPage = () => {
 
   return (
     <Container className="py-4 py-md-5">
+      <div aria-hidden="true" style={{ width: '100%', height: '5rem' }} />
       <div className="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-4">
         <div>
           <h2 className="mb-1">Borang Permohonan Pemindahan Kredit Secara Menegak</h2>
