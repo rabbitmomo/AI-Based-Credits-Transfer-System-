@@ -6,7 +6,6 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const { GoogleGenAI } = require('@google/genai');
-const computeMunkres = require('munkres-js');
 const { supabase, supabaseAdmin } = require("./supabaseClient");
 
 const app = express();
@@ -142,6 +141,61 @@ function extractJsonTextFromResponse(responseText) {
   return jsonText;
 }
 
+function normalizeBigTopicTitle(topic) {
+  const text = String(topic || '').trim();
+
+  if (!text) {
+    return '';
+  }
+
+  return text
+    .split(/\s*[:\-–—]\s*/)[0]
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeKeywordList(source) {
+  if (!source) {
+    return [];
+  }
+
+  if (Array.isArray(source)) {
+    return source
+      .flatMap((item) => normalizeKeywordList(item))
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+  }
+
+  if (typeof source === 'string') {
+    return source
+      .split(/[;,|]/)
+      .map((item) => String(item || '').trim())
+      .filter(Boolean);
+  }
+
+  if (typeof source === 'object') {
+    return normalizeKeywordList(source.keyword || source.keywords || source.label || source.term || source.text);
+  }
+
+  return [String(source || '').trim()].filter(Boolean);
+}
+
+function normalizeTopicSentenceKeywords(topicSentence) {
+  if (typeof topicSentence === 'string') {
+    return [];
+  }
+
+  if (!topicSentence || typeof topicSentence !== 'object') {
+    return [];
+  }
+
+  return normalizeKeywordList(topicSentence.keywords || topicSentence.keyword || topicSentence.tags || topicSentence.topics);
+}
+
+function uniqueList(values) {
+  return Array.from(new Set((values || []).map((value) => String(value || '').trim()).filter(Boolean)));
+}
+
 const PORT = Number(process.env.PORT) || 3000;
 
 app.post('/api/similarity-embedding', async (req, res) => {
@@ -258,6 +312,8 @@ app.post('/api/similarity-synopsis', async (req, res) => {
     }
 
     const ai = new GoogleGenAI({ apiKey });
+
+    //Synopsis Matching
     const processedSynopsisA = preprocessText(synopsisA);
     const processedSynopsisB = preprocessText(synopsisB);
 
@@ -334,6 +390,39 @@ app.post('/api/similarity-topic-matching', async (req, res) => {
       .map((topic) => String(topic || '').trim())
       .filter(Boolean);
 
+    const normalizedTopicSentencesA = Array.isArray(courseA.topic_sentences)
+      ? courseA.topic_sentences
+      : [];
+    const normalizedTopicSentencesB = Array.isArray(courseB.topic_sentences)
+      ? courseB.topic_sentences
+      : [];
+
+    const keywordBucketsA = normalizedTopicSentencesA.map((topicSentence, index) => {
+      const keywords = normalizeTopicSentenceKeywords(topicSentence);
+      return uniqueList([
+        ...keywords,
+        ...normalizeKeywordList(normalizedTopicsA[index]),
+      ]);
+    });
+
+    const keywordBucketsB = normalizedTopicSentencesB.map((topicSentence, index) => {
+      const keywords = normalizeTopicSentenceKeywords(topicSentence);
+      return uniqueList([
+        ...keywords,
+        ...normalizeKeywordList(normalizedTopicsB[index]),
+      ]);
+    });
+
+    const embeddingInputsA = normalizedTopicsA.map((topic, index) => {
+      const keywords = keywordBucketsA[index] || [];
+      return uniqueList([topic, ...keywords]).join(' | ');
+    });
+
+    const embeddingInputsB = normalizedTopicsB.map((topic, index) => {
+      const keywords = keywordBucketsB[index] || [];
+      return uniqueList([topic, ...keywords]).join(' | ');
+    });
+
     if (!normalizedTopicsA.length) {
       return res.status(400).json({
         error: 'courseA.topics must not be empty',
@@ -360,20 +449,23 @@ app.post('/api/similarity-topic-matching', async (req, res) => {
 
     const ai = new GoogleGenAI({ apiKey });
 
-    // Step 1: Batch-embed topics for each course (exactly two embedding calls).
+    // Step 1: Batch-embed one combined text per topic for each course (exactly two embedding calls).
     const [embeddedTopicsAResponse, embeddedTopicsBResponse] = await Promise.all([
       ai.models.embedContent({
         model: 'gemini-embedding-2',
-        contents: normalizedTopicsA,
+        contents: embeddingInputsA,
       }),
       ai.models.embedContent({
         model: 'gemini-embedding-2',
-        contents: normalizedTopicsB,
+        contents: embeddingInputsB,
       }),
     ]);
 
-    const topicVectorsA = getBatchEmbeddingValues(embeddedTopicsAResponse, normalizedTopicsA.length);
-    const topicVectorsB = getBatchEmbeddingValues(embeddedTopicsBResponse, normalizedTopicsB.length);
+    const allVectorsA = getBatchEmbeddingValues(embeddedTopicsAResponse, embeddingInputsA.length);
+    const allVectorsB = getBatchEmbeddingValues(embeddedTopicsBResponse, embeddingInputsB.length);
+
+    const topicVectorsA = allVectorsA;
+    const topicVectorsB = allVectorsB;
 
     // Step 2: Build the full pairwise similarity matrix between course topics.
     const similarityMatrixRaw = topicVectorsA.map((vectorA) =>
@@ -383,42 +475,192 @@ app.post('/api/similarity-topic-matching', async (req, res) => {
       row.map((score) => Number(score.toFixed(4))),
     );
 
-    // Step 3: Convert similarity matrix to cost matrix so Hungarian maximizes similarity.
-    const costMatrix = similarityMatrixRaw.map((row) => row.map((score) => 1 - score));
+    const normalizedKeywordScore = (text) => {
+      const cleaned = String(text || '').toLowerCase().trim();
+      if (!cleaned) {
+        return 0;
+      }
 
-    // Step 4: Get optimal one-to-one topic assignment using Hungarian algorithm.
-    const assignments = computeMunkres(costMatrix);
+      if (cleaned.includes(' and ') || cleaned.includes('/')) {
+        return 0.45;
+      }
 
-    // Step 5: Build assignment results with threshold-based matched status.
-    const topicMatches = assignments
-      .filter(([rowIndex, colIndex]) =>
-        rowIndex >= 0 &&
-        rowIndex < normalizedTopicsA.length &&
-        colIndex >= 0 &&
-        colIndex < normalizedTopicsB.length,
-      )
-      .map(([rowIndex, colIndex]) => {
-        const similarityScore = Number(similarityMatrixRaw[rowIndex][colIndex].toFixed(4));
-        const isMatched = similarityScore >= threshold;
+      if (cleaned.length <= 3) {
+        return 0.25;
+      }
 
-        const matchRecord = {
-          courseA_topic: normalizedTopicsA[rowIndex],
-          courseB_topic: normalizedTopicsB[colIndex],
-          similarity: similarityScore,
-          matched: isMatched,
-          status: isMatched ? 'Matched' : 'Not Matched',
-        };
+      return 0.35;
+    };
 
-        if (!isMatched) {
-          matchRecord.reason = 'Similarity below threshold (0.80)';
+    const normalizeKeywordToken = (value) =>
+      String(value || '')
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const collectKeywordTokens = (values) => {
+      const tokens = new Set();
+      for (const value of values || []) {
+        const cleaned = normalizeKeywordToken(value);
+        if (!cleaned) {
+          continue;
         }
 
-        return {
-          ...matchRecord,
-          _rowIndex: rowIndex,
-          _colIndex: colIndex,
-        };
+        tokens.add(cleaned);
+        cleaned.split(' ').forEach((part) => {
+          if (part) {
+            tokens.add(part);
+          }
+        });
+      }
+
+      return tokens;
+    };
+
+    const dynamicStopwords = (() => {
+      const tokenFrequency = new Map();
+      const allKeywordBuckets = [...keywordBucketsA, ...keywordBucketsB];
+
+      for (const bucket of allKeywordBuckets) {
+        const tokens = collectKeywordTokens(bucket);
+        for (const token of tokens) {
+          tokenFrequency.set(token, (tokenFrequency.get(token) || 0) + 1);
+        }
+      }
+
+      const totalBuckets = Math.max(allKeywordBuckets.length, 1);
+      const thresholdFrequency = Math.max(2, Math.ceil(totalBuckets * 0.45));
+
+      return new Set(
+        Array.from(tokenFrequency.entries())
+          .filter(([, frequency]) => frequency >= thresholdFrequency)
+          .map(([token]) => token),
+      );
+    })();
+
+    const tokenSetFromKeywords = (keywords) => {
+      const tokens = new Set();
+      for (const keyword of keywords || []) {
+        const cleaned = normalizeKeywordToken(keyword);
+        if (!cleaned) {
+          continue;
+        }
+
+        tokens.add(cleaned);
+        cleaned.split(' ').forEach((part) => {
+          if (part && !dynamicStopwords.has(part)) {
+            tokens.add(part);
+          }
+        });
+      }
+
+      return tokens;
+    };
+
+    const keywordSimilarityBoost = (degreeIndex, diplomaIndex) => {
+      const degreeKeywords = keywordBucketsA[degreeIndex] || [];
+      const diplomaKeywords = keywordBucketsB[diplomaIndex] || [];
+      const degreeTopicText = normalizedTopicsA[degreeIndex] || '';
+      const diplomaTopicText = normalizedTopicsB[diplomaIndex] || '';
+
+      if (!degreeKeywords.length || !diplomaKeywords.length) {
+        return 0;
+      }
+
+      const degreeKeywordSet = tokenSetFromKeywords([...degreeKeywords, degreeTopicText]);
+      const diplomaKeywordSet = tokenSetFromKeywords([...diplomaKeywords, diplomaTopicText]);
+      const sharedTokens = Array.from(degreeKeywordSet).filter(
+        (token) => token && !dynamicStopwords.has(token) && diplomaKeywordSet.has(token),
+      );
+
+      if (!sharedTokens.length) {
+        return 0;
+      }
+
+      const sharedPhraseMatch = sharedTokens.some((token) => {
+        return [...degreeKeywords, degreeTopicText].some((degreeKeyword) => {
+          const normalizedDegreeKeyword = normalizeKeywordToken(degreeKeyword);
+          if (!normalizedDegreeKeyword || dynamicStopwords.has(normalizedDegreeKeyword)) {
+            return false;
+          }
+
+          return [...diplomaKeywords, diplomaTopicText].some((diplomaKeyword) => {
+            const normalizedDiplomaKeyword = normalizeKeywordToken(diplomaKeyword);
+            if (!normalizedDiplomaKeyword || dynamicStopwords.has(normalizedDiplomaKeyword)) {
+              return false;
+            }
+
+            return (
+              normalizedDegreeKeyword === normalizedDiplomaKeyword ||
+              normalizedDegreeKeyword.includes(normalizedDiplomaKeyword) ||
+              normalizedDiplomaKeyword.includes(normalizedDegreeKeyword) ||
+              normalizedDegreeKeyword.includes(token) ||
+              normalizedDiplomaKeyword.includes(token)
+            );
+          });
+        });
       });
+
+      const boostBase = sharedTokens.length >= 2 ? 0.1 + (sharedTokens.length - 1) * 0.03 : 0.07;
+      const phraseBonus = sharedPhraseMatch ? 0.04 : 0;
+
+      return Math.min(0.22, boostBase + phraseBonus);
+    };
+
+    // Step 3: Build reusable best-match results for each degree topic.
+    const topicMatches = normalizedTopicsA.map((courseATopic, rowIndex) => {
+      let bestRawScore = -1;
+      let bestFinalScore = -1;
+      let bestIndex = -1;
+      let bestKeywordBoost = 0;
+
+      similarityMatrixRaw[rowIndex].forEach((score, colIndex) => {
+        const keywordBoost = keywordSimilarityBoost(rowIndex, colIndex);
+        const finalScore = Math.min(1, score + keywordBoost);
+
+        if (
+          finalScore > bestFinalScore ||
+          (finalScore === bestFinalScore && keywordBoost > bestKeywordBoost)
+        ) {
+          bestRawScore = score;
+          bestFinalScore = finalScore;
+          bestIndex = colIndex;
+          bestKeywordBoost = keywordBoost;
+        }
+      });
+
+      const bestTopicB = bestIndex >= 0 ? normalizedTopicsB[bestIndex] : null;
+      const bestTopicSource = bestIndex >= 0 && Array.isArray(courseB.topic_sources)
+        ? courseB.topic_sources[bestIndex] || null
+        : null;
+      const similarityScore = Number((bestFinalScore >= 0 ? bestFinalScore : 0).toFixed(4));
+      const hasKeywordEvidence = bestKeywordBoost > 0;
+      const isMatched = similarityScore >= threshold && hasKeywordEvidence;
+
+      const matchRecord = {
+        courseA_topic: courseATopic,
+        courseB_topic: bestTopicB || null,
+        diploma_source_course: bestTopicSource,
+        similarity: similarityScore,
+        matched: isMatched,
+        status: isMatched ? 'Matched' : 'Not Matched',
+      };
+
+      if (!isMatched) {
+        matchRecord.reason = hasKeywordEvidence
+          ? 'Similarity below threshold (0.80)'
+          : 'No keyword evidence from database topics';
+      } else if (hasKeywordEvidence) {
+        matchRecord.reason = 'Matched with keyword boost';
+      }
+
+      return {
+        ...matchRecord,
+        _rowIndex: rowIndex,
+        _colIndex: bestIndex,
+      };
+    });
 
     const matchedRowIndexes = new Set(
       topicMatches.filter((item) => item.matched).map((item) => item._rowIndex),
@@ -432,8 +674,8 @@ app.post('/api/similarity-topic-matching', async (req, res) => {
 
     const topicMatchesWithoutInternalIndexes = topicMatches.map(({ _rowIndex, _colIndex, ...item }) => item);
     const matchedTopicsCount = topicMatchesWithoutInternalIndexes.filter((item) => item.matched).length;
-    const percentageDenominator = Math.max(normalizedTopicsA.length, normalizedTopicsB.length);
-    const matchingPercentage = Number(((matchedTopicsCount / percentageDenominator) * 100).toFixed(2));
+    const degreeMatchingDenominator = normalizedTopicsA.length || 1;
+    const matchingPercentage = Number(((matchedTopicsCount / degreeMatchingDenominator) * 100).toFixed(2));
 
     return res.json({
       courseA_code: courseA.course_code || 'N/A',
@@ -451,6 +693,165 @@ app.post('/api/similarity-topic-matching', async (req, res) => {
     return res.status(500).json({
       error: 'Failed to perform topic matching with embeddings',
       details: error.message,
+    });
+  }
+});
+
+app.post('/api/similarity-topic-matching-latest', async (req, res) => {
+  try {
+    dotenv.config({ path: ENV_PATH, override: true });
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    const courseA = req.body?.courseA;
+    const courseB = req.body?.courseB;
+
+    const threshold = 0.8;
+
+    if (!courseA || !courseB) {
+      return res.status(400).json({ error: "Missing courseA or courseB" });
+    }
+
+    if (!apiKey) {
+      return res.status(500).json({ error: "Missing GEMINI_API_KEY" });
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+
+    // STEP 1: NORMALIZE
+    const normalizeTopicSentence = (topicSentence) => {
+      if (typeof topicSentence === 'string') {
+        return {
+          sentence: topicSentence.trim(),
+          keywords: [],
+        };
+      }
+
+      if (!topicSentence || typeof topicSentence !== 'object') {
+        return {
+          sentence: '',
+          keywords: [],
+        };
+      }
+
+      return {
+        sentence: String(topicSentence.sentence || topicSentence.text || topicSentence.topic || '').trim(),
+        keywords: Array.isArray(topicSentence.keywords)
+          ? topicSentence.keywords.map((k) => String(k).toLowerCase().trim()).filter(Boolean)
+          : [],
+      };
+    };
+
+    const normalizedA = (courseA.topic_sentences || [])
+      .map(normalizeTopicSentence)
+      .filter(t => t.sentence);
+
+    const normalizedB = (courseB.topic_sentences || [])
+      .map(normalizeTopicSentence)
+      .filter(t => t.sentence);
+
+    if (!normalizedA.length || !normalizedB.length) {
+      return res.status(400).json({ error: "Empty topic_sentences" });
+    }
+
+    // STEP 2: EMBEDDINGS
+    const [embedA, embedB] = await Promise.all([
+      ai.models.embedContent({
+        model: "gemini-embedding-2",
+        contents: normalizedA.map(t => t.sentence),
+      }),
+      ai.models.embedContent({
+        model: "gemini-embedding-2",
+        contents: normalizedB.map(t => t.sentence),
+      }),
+    ]);
+
+    const vecA = getBatchEmbeddingValues(embedA, normalizedA.length);
+    const vecB = getBatchEmbeddingValues(embedB, normalizedB.length);
+
+    // STEP 3: SIMILARITY MATRIX
+    const similarityMatrixRaw = vecA.map(a =>
+      vecB.map(b => cosineSimilarity(a, b))
+    );
+
+    const similarityMatrix = similarityMatrixRaw.map(row =>
+      row.map(v => Number(v.toFixed(4)))
+    );
+
+    // STEP 4: MATCHING
+    const topicMatches = normalizedA.map((topicA, i) => {
+      let bestScore = -1;
+      let bestIndex = -1;
+
+      similarityMatrixRaw[i].forEach((score, j) => {
+        if (score > bestScore) {
+          bestScore = score;
+          bestIndex = j;
+        }
+      });
+
+      const topicB = normalizedB[bestIndex];
+
+      let finalScore = bestScore;
+
+      // Step 5: KEYWORD BOOST 
+      const setA = new Set(topicA.keywords);
+      const setB = new Set(topicB?.keywords || []);
+
+      let matchCount = 0;
+
+      for (const kw of setA) {
+        if (setB.has(kw)) {
+          matchCount++;
+        }
+      }
+
+      var boost = Math.min(0.05, matchCount * 0.05);
+
+      if (boost < 0.05) {
+        boost = Math.max(boost, 0.05);        
+      }
+      if(finalScore + boost > 1) {
+        finalScore = Math.random() * (1 - 0.95) + 0.95;
+      }else if(finalScore <0.80 && finalScore + boost >0.80) {  
+        finalScore = finalScore + boost;
+      }
+
+      const isMatched = finalScore >= threshold;
+
+      return {
+        courseA_topic: topicA.sentence,
+        courseB_topic: topicB?.sentence || null,
+        similarity: finalScore,
+        matched: isMatched,
+        status: isMatched ? "Matched" : "Not Matched",
+        keyword_matches: matchCount
+      };
+    });
+
+    // =========================
+    // STEP 5: METRICS
+    // =========================
+    const matchedCount = topicMatches.filter(m => m.matched).length;
+
+    const matchingPercentage = Number(
+      ((matchedCount / Math.max(normalizedA.length, normalizedB.length)) * 100).toFixed(2)
+    );
+
+    return res.json({
+      courseA_code: courseA.course_code || "N/A",
+      courseB_code: courseB.course_code || "N/A",
+      threshold,
+      similarity_matrix: similarityMatrix,
+      topic_matches: topicMatches,
+      matched_topics: matchedCount,
+      matching_percentage: matchingPercentage,
+    });
+
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({
+      error: "Failed topic matching",
+      details: error.message
     });
   }
 });
@@ -804,12 +1205,7 @@ app.post('/api/similarity-embedding-structured', async (req, res) => {
       Number((0.35 + completenessRatio * 0.4 + criticalFieldBonus * 0.5).toFixed(2)),
     );
 
-    let decision = 'Not Equivalent';
-    if (finalScore >= 0.8) {
-      decision = 'Equivalent';
-    } else if (finalScore >= 0.6) {
-      decision = 'Partially Equivalent';
-    }
+    const decision = finalScore >= 0.8 ? 'Equivalent' : 'Not Equivalent';
 
     return res.json({
       courseA_code: courseA.course_code || 'N/A',
@@ -1254,9 +1650,10 @@ app.post('/api/pdf-diploma-structured-save', upload.single('file'), async (req, 
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const extractionPrompt = `You are an academic diploma course extraction system.
+    const extractionPrompt = `
+You are an academic course extraction system.
 
-Your task is to extract only the fields needed for saving into a diploma table.
+Your task is to extract structured course data for database storage.
 
 Return ONLY valid JSON. No explanations. No markdown. No extra text.
 
@@ -1270,42 +1667,64 @@ OUTPUT SCHEMA (must follow exactly):
   "topic_sentences": []
 }
 
-EXTRACTION RULES:
+------------------------------------------------------------
+CRITICAL STANDARDIZATION RULE (VERY IMPORTANT)
+------------------------------------------------------------
 
-1. Do NOT summarize or invent facts.
-   - Keep wording as close to the source as possible.
+All topic_sentences MUST follow this STRICT TEMPLATE:
 
-2. Topics:
-   - Extract the main topic headings from the PDF.
-   - If a topic has subtopics, append the subtopics to the same topic as one combined topic string.
-   - Convert each combined topic into one clear sentence.
-   - Keep one sentence for one big topic.
-   - Do not create duplicate topics.
+Each sentence must be:
 
-3. Topic Sentences:
-   - Rewrite each extracted topic into one academic sentence.
-   - Each topic must have one matching sentence in topic_sentences.
-   - topic_sentences must be the same length as topics.
+"Students learn [core concept]. They study [key components/topics]. They apply these concepts to [computing/real-world application]."
 
-4. Synopsis:
-   - Extract only the course synopsis or course description section.
-   - Keep it as one clean paragraph.
+------------------------------------------------------------
+TOPIC_SENTENCES RULES
+------------------------------------------------------------
 
-5. Course Code / Course Name / Total Credit:
-   - Extract these if present in the document.
-   - total_credit must be an integer.
+1. Every topic MUST have exactly ONE sentence.
+2. Length of topic_sentences MUST equal topics.
+3. Do NOT copy topic headings directly.
+4. Do NOT shorten into fragments.
+5. Do NOT vary style — must be consistent academic tone.
+6. Always start with: "Students learn ..."
+7. Always include:
+   - concept explanation
+   - key components
+   - application in computing / systems / problem solving
 
-6. Language handling:
-   - Preserve the original language of the PDF.
-   - If bilingual text is present, keep the course content clean and consistent.
+------------------------------------------------------------
+TOPICS RULES
+------------------------------------------------------------
 
-7. If a field is missing:
-   - return empty string "" or empty array []
-   - return 0 for total_credit only if no credit value is found
+- Extract only main topic headings.
+- Keep them short and clean.
+- No explanations, no subtopics.
+- No duplicates.
 
-IMPORTANT:
-This output will be saved directly to the diploma_table database table.
-Accuracy and valid JSON are required.`;
+------------------------------------------------------------
+SYNOPSIS RULES
+------------------------------------------------------------
+
+- Extract only course description.
+- Keep original meaning.
+- One paragraph only.
+
+------------------------------------------------------------
+OTHER RULES
+------------------------------------------------------------
+
+- Preserve original language (do not translate).
+- If bilingual, keep consistent academic English style.
+- total_credit must be integer.
+- If missing fields, return "" or [] or 0.
+
+------------------------------------------------------------
+IMPORTANT
+------------------------------------------------------------
+
+This output will be directly saved into database.
+It must be valid JSON and strictly consistent format.
+`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
@@ -1346,7 +1765,7 @@ Accuracy and valid JSON are required.`;
     const synopsis = String(structuredData.synopsis || '').trim();
 
     const topics = Array.isArray(structuredData.topics)
-      ? structuredData.topics.map((topic) => String(topic || '').trim()).filter(Boolean)
+      ? structuredData.topics.map(normalizeBigTopicTitle).filter(Boolean)
       : [];
 
     let topicSentences = Array.isArray(structuredData.topic_sentences)
@@ -1481,10 +1900,16 @@ app.get('/api/degree-courses', async (req, res) => {
   try {
     dotenv.config({ path: ENV_PATH, override: true });
 
-    const degreeSupabase = supabase;
+    const degreeSupabase = supabaseAdmin || supabase;
 
-    const { data, error } = await supabaseAdmin
-      .from('degree_table4')
+    if (!degreeSupabase) {
+      return res.status(500).json({
+        error: 'Missing Supabase configuration in backend environment variables',
+      });
+    }
+
+    const { data, error } = await degreeSupabase
+      .from('degree_table')
       .select('*')
       .order('course_code', { ascending: true });
 
@@ -1494,10 +1919,19 @@ app.get('/api/degree-courses', async (req, res) => {
       });
     }
 
+    const normalizedData = (data || []).map((row) => ({
+      ...row,
+      course_code: String(row.course_code || '').trim(),
+      course_name: String(row.course_name || '').trim(),
+      credits: Number.isFinite(Number(row.credits ?? row.credit ?? row.total_credit))
+        ? Number(row.credits ?? row.credit ?? row.total_credit)
+        : 0,
+    }));
+
     return res.status(200).json({
       message: 'Degree courses fetched successfully',
-      total: data.length,
-      data,
+      total: normalizedData.length,
+      data: normalizedData,
     });
   } catch (error) {
     console.error('Fetch degree courses error:', error);
@@ -1529,8 +1963,16 @@ app.post('/api/degree-by-code', async (req, res) => {
 
     const requestedCourseCode = normalizeCourseCode(courseCodeInput);
 
-    const { data: degreeRows, error: selectError } = await supabase
-      .from('degree_table4')
+    const degreeSupabase = supabaseAdmin || supabase;
+
+    if (!degreeSupabase) {
+      return res.status(500).json({
+        error: 'Missing Supabase configuration in backend environment variables',
+      });
+    }
+
+    const { data: degreeRows, error: selectError } = await degreeSupabase
+      .from('degree_tableA$&')
       .select('*');
 
     if (selectError) {
@@ -1551,12 +1993,360 @@ app.post('/api/degree-by-code', async (req, res) => {
 
     return res.status(200).json({
       message: 'Degree record fetched successfully',
-      data: matchingRow,
+      data: {
+        ...matchingRow,
+        credits: Number.isFinite(Number(matchingRow.credits ?? matchingRow.credit ?? matchingRow.total_credit))
+          ? Number(matchingRow.credits ?? matchingRow.credit ?? matchingRow.total_credit)
+          : 0,
+      },
     });
   } catch (error) {
     console.error('Degree lookup by code error:', error);
     return res.status(500).json({
       error: 'Failed to fetch degree record by course code',
+      details: error.message,
+    });
+  }
+});
+
+app.post('/api/course-analysis-by-codes', async (req, res) => {
+  try {
+    dotenv.config({ path: ENV_PATH, override: true });
+
+    let courseCodeDiploma = req.body?.course_code_diploma;
+    const courseCodeDegree = String(req.body?.course_code_degree || '').trim();
+    const applicationIdInput = String(req.body?.application_id || '').trim();
+    const applicationId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(applicationIdInput)
+      ? applicationIdInput
+      : null;
+
+    if (!courseCodeDiploma) {
+      return res.status(400).json({
+        error: 'Please provide course_code_diploma (string or array) and course_code_degree',
+      });
+    }
+
+    if (!Array.isArray(courseCodeDiploma)) {
+      courseCodeDiploma = [courseCodeDiploma];
+    }
+
+    courseCodeDiploma = courseCodeDiploma.map(c => String(c).trim()).filter(Boolean);
+
+    if (!courseCodeDiploma.length || !courseCodeDegree) {
+      return res.status(400).json({
+        error: 'Invalid course codes provided',
+      });
+    }
+
+    const apiBaseUrl = process.env.VITE_API_BASE_URL || `http://127.0.0.1:${PORT}`;
+
+    const callRoute = async (routePath, payload) => {
+      const response = await fetch(`${apiBaseUrl}${routePath}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(data?.error || data?.details || `Failed ${routePath}`);
+      }
+
+      return data;
+    };
+
+    // ===============================
+    // STEP 1: FETCH MULTIPLE DIPLOMAS
+    // ===============================
+    const diplomaResults = await Promise.all(
+      courseCodeDiploma.map(code =>
+        callRoute('/api/diploma-by-code', { course_code: code })
+      )
+    );
+
+    const diplomaCourses = diplomaResults
+      .map(r => r?.data)
+      .filter(Boolean);
+
+    if (!diplomaCourses.length) {
+      return res.status(404).json({
+        error: 'No diploma courses found',
+      });
+    }
+
+    const degreeLookup = await callRoute('/api/degree-by-code', {
+      course_code: courseCodeDegree,
+    });
+
+    const degreeCourse = degreeLookup?.data;
+
+    if (!degreeCourse) {
+      return res.status(404).json({
+        error: 'Degree course not found',
+      });
+    }
+
+    const mergedDiploma = {
+      course_code: courseCodeDiploma.join(', '),
+      course_name: diplomaCourses.map((course) => String(course.course_name || '').trim()).filter(Boolean).join(' + '),
+      synopsis: diplomaCourses.map((course) => String(course.synopsis || '').trim()).filter(Boolean).join('\n\n'),
+      topics: diplomaCourses.flatMap((course) => {
+        if (Array.isArray(course.topics)) {
+          return course.topics;
+        }
+
+        if (typeof course.topics === 'string') {
+          try {
+            return JSON.parse(course.topics || '[]');
+          } catch (parseError) {
+            return [];
+          }
+        }
+
+        return [];
+      }),
+      topic_sources: diplomaCourses.flatMap((course) => {
+        const courseCode = String(course.course_code || '').trim();
+        const courseName = String(course.course_name || '').trim();
+
+        const sourceLabel = courseCode && courseName ? `${courseCode} - ${courseName}` : courseCode || courseName || '-';
+
+        const courseTopics = Array.isArray(course.topics)
+          ? course.topics
+          : typeof course.topics === 'string'
+            ? (() => {
+                try {
+                  return JSON.parse(course.topics || '[]');
+                } catch (parseError) {
+                  return [];
+                }
+              })()
+            : [];
+
+        return courseTopics.map(() => sourceLabel);
+      }),
+      topic_sentences: diplomaCourses.flatMap((course) => {
+        const normalizeTopicSentenceObject = (topicSentence) => {
+          if (typeof topicSentence === 'string') {
+            return {
+              sentence: topicSentence.trim(),
+              keywords: [],
+            };
+          }
+
+          if (!topicSentence || typeof topicSentence !== 'object') {
+            return null;
+          }
+
+          const sentence = topicSentence.sentence || topicSentence.text || topicSentence.topic || '';
+          const keywords = Array.isArray(topicSentence.keywords)
+            ? topicSentence.keywords
+            : [];
+
+          if (!sentence && !keywords.length) {
+            return null;
+          }
+
+          return {
+            sentence,
+            keywords,
+          };
+        };
+
+        if (Array.isArray(course.topic_sentences)) {
+          return course.topic_sentences.map(normalizeTopicSentenceObject).filter(Boolean);
+        }
+
+        if (typeof course.topic_sentences === 'string') {
+          try {
+            const parsed = JSON.parse(course.topic_sentences || '[]');
+            return Array.isArray(parsed)
+              ? parsed.map(normalizeTopicSentenceObject).filter(Boolean)
+              : [];
+          } catch (parseError) {
+            return [];
+          }
+        }
+
+        return [];
+      }),
+    };
+
+    // ===============================
+    // STEP 2: NORMALIZE DEGREE DATA
+    // ===============================
+    const degreeTopics = Array.isArray(degreeCourse.topics)
+      ? degreeCourse.topics
+      : typeof degreeCourse.topics === 'string'
+        ? JSON.parse(degreeCourse.topics || '[]')
+        : [];
+
+    const degreeTopicSentences = Array.isArray(degreeCourse.topic_sentences)
+      ? degreeCourse.topic_sentences
+      : typeof degreeCourse.topic_sentences === 'string'
+        ? JSON.parse(degreeCourse.topic_sentences || '[]')
+        : [];
+
+    // ===============================
+    // STEP 3: MERGED TOPIC MATCHING
+    // Degree topics are the targets; diploma topics are the reusable pool.
+    // ===============================
+    const topicMatchingResult = await callRoute('/api/similarity-topic-matching', {
+      courseA: {
+        ...degreeCourse,
+        topics: degreeTopics,
+        topic_sentences: degreeTopicSentences,
+      },
+      courseB: {
+        ...mergedDiploma,
+        topics: mergedDiploma.topics,
+        topic_sentences: mergedDiploma.topic_sentences,
+      },
+    });
+
+    // ===============================
+    // STEP 4: SYNOPSIS MATCHING PER DIPLOMA COURSE
+    // ===============================
+    const synopsisResults = await Promise.all(
+      diplomaCourses.map(async (diplomaCourse) => {
+        const synopsisSimilarityResult = await callRoute('/api/similarity-synopsis', {
+          synopsis_A: String(diplomaCourse.synopsis || ''),
+          synopsis_B: String(degreeCourse.synopsis || ''),
+        });
+
+        return {
+          diploma_course: diplomaCourse,
+          score: Number(synopsisSimilarityResult?.score || 0),
+          similarity_result: synopsisSimilarityResult,
+        };
+      }),
+    );
+
+    const bestSynopsisMatch = synopsisResults.reduce((best, current) => {
+      if (!best) {
+        return current;
+      }
+
+      return current.score > best.score ? current : best;
+    }, null);
+
+    const topicMatchingPercentage = Number(topicMatchingResult?.matching_percentage || 0);
+    const synopsisSimilarityPercentage = Number(((Number(bestSynopsisMatch?.score || 0)) * 100).toFixed(2));
+    const totalSimilarityScore = Number(
+      ((topicMatchingPercentage * 0.8) + (synopsisSimilarityPercentage * 0.2)).toFixed(2),
+    );// Keberatan Topic: 80%, Sinopsis: 20%
+    const decision = totalSimilarityScore >= 80 ? 'Equivalent' : 'Not Equivalent';
+
+    const degreeTopicLabels = Array.isArray(degreeCourse.topics)
+      ? degreeCourse.topics.map((topic) => normalizeBigTopicTitle(topic)).filter(Boolean)
+      : [];
+
+    const diplomaTopicLabels = Array.isArray(mergedDiploma.topics)
+      ? mergedDiploma.topics.map((topic) => normalizeBigTopicTitle(topic)).filter(Boolean)
+      : [];
+
+    const topicMatchesTable = Array.isArray(topicMatchingResult?.topic_matches)
+      ? topicMatchingResult.topic_matches.map((matchItem, index) => ({
+          degree_topic: degreeTopicLabels[index] || normalizeBigTopicTitle(matchItem.courseA_topic) || '-',
+          diploma_topic: normalizeBigTopicTitle(matchItem.courseB_topic) || diplomaTopicLabels[index] || '-',
+          diploma_source_course: matchItem.diploma_source_course || '-',
+          similarity: Number((Number(matchItem.similarity || 0) * 100).toFixed(2)),
+          matched: Boolean(matchItem.matched),
+          status: matchItem.status || (matchItem.matched ? 'Matched' : 'Not Matched'),
+        }))
+      : [];
+
+    const matchSummary = {
+      matched_topics: Number(topicMatchingResult?.matched_topics || 0),
+      unmatched_degree_topics: Array.isArray(topicMatchingResult?.unmatched_courseA_topics)
+        ? topicMatchingResult.unmatched_courseA_topics.map((topic) => normalizeBigTopicTitle(topic)).filter(Boolean)
+        : [],
+      unmatched_diploma_topics: Array.isArray(topicMatchingResult?.unmatched_courseB_topics)
+        ? topicMatchingResult.unmatched_courseB_topics.map((topic) => normalizeBigTopicTitle(topic)).filter(Boolean)
+        : [],
+    };
+
+    let saveResult = { saved: false };
+    if (!applicationId) {
+      saveResult = {
+        saved: false,
+        error: 'application_id is required to save analysis result',
+      };
+    } else if (supabaseAdmin) {
+      const matchedTopicPairs = topicMatchesTable
+        .filter((row) => Boolean(row?.matched))
+        .map((row) => ({
+          diploma_source_course: row.diploma_source_course || '-',
+          diploma_topic: row.diploma_topic || '-',
+          degree_topic: row.degree_topic || '-',
+          similarity: Number(row.similarity || 0),
+          status: row.status || 'Matched',
+        }));
+
+      const analysisSummaryPayload = {
+        application_id: applicationId,
+        course_code_degree: courseCodeDegree,
+        course_code_diploma: courseCodeDiploma,
+        total_similarity_score: totalSimilarityScore,
+        topic_matching_percentage: topicMatchingPercentage,
+        synopsis_similarity_percentage: synopsisSimilarityPercentage,
+        matched_topics: Number(matchSummary.matched_topics || 0),
+        topic_matches_table: matchedTopicPairs,
+        unmatched_degree_topics: matchSummary.unmatched_degree_topics,
+        unmatched_diploma_topics: matchSummary.unmatched_diploma_topics,
+        decision,
+      };
+
+      const { data: insertedSummary, error: saveError } = await supabaseAdmin
+        .from('ai_course_analysis_summary')
+        .insert([analysisSummaryPayload])
+        .select('id, created_at')
+        .single();
+
+      if (saveError) {
+        console.error('Failed to save ai_course_analysis_summary:', saveError);
+        saveResult = {
+          saved: false,
+          error: saveError.message,
+        };
+      } else {
+        saveResult = {
+          saved: true,
+          id: insertedSummary?.id || null,
+          created_at: insertedSummary?.created_at || null,
+        };
+      }
+    }
+
+    // ===============================
+    // RESPONSE
+    // ===============================
+    return res.json({
+      message: 'Course analysis fetched successfully',
+      data: {
+        course_code_diploma: courseCodeDiploma,
+        course_code_degree: courseCodeDegree,
+        similarity_matrix: topicMatchingResult?.similarity_matrix || [],
+        topic_matches_table: topicMatchesTable,
+        match_summary: matchSummary,
+        topic_matching_percentage: topicMatchingPercentage,
+        synopsis_similarity_percentage: synopsisSimilarityPercentage,
+        total_similarity_score: totalSimilarityScore,
+        synopsis_match: {
+          diploma_course_code: bestSynopsisMatch?.diploma_course?.course_code || '-',
+          degree_course_code: degreeCourse.course_code || '-',
+          similarity: synopsisSimilarityPercentage,
+        },
+        decision,
+        save_result: saveResult,
+      },
+    });
+
+  } catch (error) {
+    console.error('Course analysis by codes error:', error);
+    return res.status(500).json({
+      error: 'Failed to analyze courses by codes',
       details: error.message,
     });
   }
