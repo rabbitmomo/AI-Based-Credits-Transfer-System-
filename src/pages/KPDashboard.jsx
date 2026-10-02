@@ -450,6 +450,39 @@ const KPDashboard = () => {
     }));
   };
 
+  const buildGroupedReportRows = (courses = [], analysisRows = []) => {
+    const analysisMap = new Map(
+      analysisRows.map((row) => [String(row.groupKey || row.courseNo || '').trim(), row]),
+    );
+
+    return buildDegreeGroups(courses).map((group, index) => {
+      const diplomaCodes = [...new Set(
+        group.rows
+          .map((row) => String(row.diploma?.course_code || '').trim())
+          .filter(Boolean),
+      )];
+      const diplomaNames = [...new Set(
+        group.rows
+          .map((row) => String(row.diploma?.course_name || '').trim())
+          .filter(Boolean),
+      )];
+      const analysisRow = analysisMap.get(String(group.key || '').trim()) || null;
+      const fallbackScore = group.rows.find((row) => row.skorKesamaan !== null && row.skorKesamaan !== undefined)?.skorKesamaan ?? null;
+      const fallbackDecision = group.rows.find((row) => row.decision) ? group.rows.find((row) => row.decision).decision : '-';
+
+      return {
+        groupKey: group.key,
+        displayNo: index + 1,
+        diplomaCodes,
+        diplomaNames,
+        degreeCode: group.degree?.course_code || '-',
+        degreeName: group.degree?.course_name || '-',
+        score: analysisRow ? analysisRow.score : fallbackScore,
+        decision: analysisRow ? analysisRow.decision : fallbackDecision,
+      };
+    });
+  };
+
   const getUniqueDegreeCreditTotal = (courses = []) => {
     const seenDegreeKeys = new Set();
 
@@ -548,15 +581,26 @@ const KPDashboard = () => {
   const buildReportAnalysisRows = async (app) => {
     const rows = [];
 
-    for (const course of app.courses || []) {
+    for (const group of buildDegreeGroups(app.courses || [])) {
+      const firstCourse = group.rows[0];
+      if (!firstCourse) {
+        continue;
+      }
+
       const analysisRow = await runCourseAnalysis(
-        course,
-        course.diploma?.course_code ? [course.diploma.course_code] : [],
-        course.degree?.course_code || '',
+        firstCourse,
+        group.rows
+          .map((row) => row.diploma?.course_code)
+          .filter(Boolean),
+        group.degree?.course_code || '',
         app?.idPermohonanAsal || '',
       );
       if (analysisRow) {
-        rows.push(analysisRow);
+        rows.push({
+          ...analysisRow,
+          groupKey: group.key,
+          courseNo: rows.length + 1,
+        });
       }
     }
 
@@ -566,7 +610,7 @@ const KPDashboard = () => {
   const generateOfficialReport = async (app, decision, analysisRows = []) => {
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });
     const pageWidth = doc.internal.pageSize.getWidth();
-    const analysisMap = new Map(analysisRows.map((row) => [row.courseNo, row]));
+    const groupedRows = buildGroupedReportRows(app.courses || [], analysisRows);
 
     addReportHeader(
       doc,
@@ -596,17 +640,16 @@ const KPDashboard = () => {
     ], cursorY + 2);
 
     cursorY = addSectionTitle(doc, 'B. Senarai Kursus Yang Dimohon', cursorY + 4);
-    const courseRows = (app.courses || []).map((course) => {
-      const freshAnalysis = analysisMap.get(course.courseNo);
-      const score = freshAnalysis ? freshAnalysis.score : course.skorKesamaan;
-      const finalDecision = freshAnalysis ? freshAnalysis.decision : course.decision;
+    const courseRows = groupedRows.map((groupRow) => {
+      const score = groupRow.score;
+      const finalDecision = groupRow.decision;
 
       return [
-        course.courseNo,
-        course.diploma?.course_code || '-',
-        course.diploma?.course_name || '-',
-        course.degree?.course_code || '-',
-        course.degree?.course_name || '-',
+        groupRow.displayNo,
+        groupRow.diplomaCodes.join(', ') || '-',
+        groupRow.diplomaNames.join(' / ') || '-',
+        groupRow.degreeCode,
+        groupRow.degreeName,
         formatScore(score),
         finalDecision || '-',
       ];
@@ -670,7 +713,7 @@ const KPDashboard = () => {
         cursorY = ensurePdfSpace(doc, cursorY, 45);
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(10);
-        doc.text(`Kursus No. ${row.courseNo}`, 15, cursorY);
+        doc.text(`Kumpulan Degree ${row.courseNo}`, 15, cursorY);
         cursorY += 5;
 
         cursorY = addKeyValueRows(doc, [

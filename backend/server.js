@@ -1972,7 +1972,7 @@ app.post('/api/degree-by-code', async (req, res) => {
     }
 
     const { data: degreeRows, error: selectError } = await degreeSupabase
-      .from('degree_tableA$&')
+      .from('degree_table')
       .select('*');
 
     if (selectError) {
